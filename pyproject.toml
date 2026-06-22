@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=77.0.0"]   # >=77 => PEP 639 SPDX `license` string support
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neural_tilde"
+version = "0.0.2"
+description = "Exporting PyTorch neural audio synthesis models in ExecuTorch for neural_tilde."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "CC-BY-NC-4.0"            # SPDX; matches the actual LICENSE (CC BY-NC 4.0 Intl)
+license-files = ["LICENSE"]
+authors = [{ name = "Jasper Shuoyang Zheng", email = "jasper.zheng.u@gmail.com" }]
+keywords = ["executorch", "pytorch", "neural audio", "max msp", "audio synthesis", "rave"]
+classifiers = [                     # NO "License ::" classifier -- PEP 639 forbids mixing it
+    "Development Status :: 3 - Alpha",            #   with the SPDX `license` field above
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["torch>=2.12.0"]    # the ONLY hard dep (everything else is lazy/user-provided)
+
+[project.optional-dependencies]
+coreml = ["coremltools>=9.0"]       # for the CoreML partitioner path
+dev = ["build", "twine"]            # build + validate dist artifacts
+# NOTE: executorch is intentionally NOT declared -- the MLX/CoreML-capable build is from
+# source (not on PyPI); the code detects it lazily and errors helpfully when missing.
+
+[project.urls]
+Homepage = "https://github.com/jasper-zheng/neural_tilde"
+Repository = "https://github.com/jasper-zheng/neural_tilde"
+
+[project.scripts]
+neural-tilde-migrate = "neural_tilde.migrate:main"   # migrate.py already has main()
+
+[tool.setuptools]
+packages = ["neural_tilde"]
+package-dir = { neural_tilde = "python_tools" }      # mirrors old setup.py mapping exactly
