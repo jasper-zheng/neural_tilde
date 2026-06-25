@@ -1,9 +1,11 @@
 # `neural`: neural audio synthesis in Max/MSP
 
+[![PyPI version](https://img.shields.io/pypi/v/neural-tilde.svg)](https://pypi.org/project/neural-tilde/) [![Status](https://img.shields.io/badge/status-alpha-orange)](https://github.com/jasper-zheng/neural_tilde) [![Built with ExecuTorch](https://img.shields.io/badge/built%20with-ExecuTorch-EE4C2C?logo=pytorch)](https://pytorch.org/executorch/)
+
 **Max externals for running neural synthesis models realtime/offline.**   
 Models are exported from PyTorch with [ExecuTorch](https://pytorch.org/executorch/) and run inside Max with hardware acceleration on CPU / GPU / ANE (Apple Neural Engine).
 
-
+<img src="assets/front.png" width="700" alt="example patch" />
 
 
 This package has two families of Max objects:
@@ -85,7 +87,7 @@ Compiled externals / Max help patches will be available soon. For now, please bu
 
 ## Objects
 
-`neural.live~` and `neural.gen~` are the main objects for running neural synthesis models. They are for different use cases: `neural.live~` is for realtimestreaming models (e.g. neural vocoder, neural codec, etc.), while `neural.gen~` is for offline generative models (e.g. one-shot text-to-audio, audio inpainting).
+`neural.live~` and `neural.gen~` are the main objects for running neural synthesis models. They are for different use cases: `neural.live~` is for realtime streaming models (e.g. neural vocoder, neural codec, etc.), while `neural.gen~` is for offline generative models (e.g. one-shot text-to-audio, audio inpainting).
 
 | `neural.live~` | `neural.gen~` |
 | --- | --- |
@@ -222,7 +224,9 @@ pip install neural-tilde
 
  - Subclass `neural_tilde.LiveModule` / `.GenModule`
  - Build your model
- - **Register inputs:** give each method extra inputs using `register_attribute` / `register_noise` / `register_condition`
+ - **Register inputs:** declare inputs and their roles using `register_attribute` / `register_noise` / `register_condition`.
+ - **Register tokenizer [optional]:** If your model has a tokenizer, use `register_tokenizer(...)` to register it. 
+ - **Register buffer [optional]:** If your model has a buffer input, use `register_buffer_input(...)` to register it.
  - **Register methods:** use `register_method(...)` register each method and their inputs / outputs. Registered roles are listed in order via the `inputs=[...]` argument; the method takes them after the audio tensor (e.g., `forward(self, x, gain, bias)`). 
  - **Export model:** Use `export_to_pte(..., delegate="coreml")` to export, which will result in the model weights `.pte` and the sidecar `.json`
 
@@ -325,7 +329,7 @@ model.register_method("prompt2audio",
                       out_sample_rate=44100
                       )
 
-path = model.export_to_pte(out, delegate="coreml")
+path = model.export_to_pte("mini-gen", delegate="coreml")
 ```
 To run the above example:
 ```bash
@@ -338,7 +342,7 @@ Results in:
 
 ### Tokenizer Example:
 
-The `register_tokenizer(...)` method registers the tokenizer if the model has one. If you have a custom tokenizer, you can use `neural_tilde.Tokenizer` to export it to `.tokenizer.json` and `.tokenizer.config.json`:
+The `register_tokenizer(...)` method registers a HuggingFace tokenizer if the model has one (in the form of a `tokenizer.json` file). If you have a custom tokenizer, you can use `neural_tilde.Tokenizer` to export it to `.tokenizer.json` and `.tokenizer.config.json`:
 
 A complete example is in [`examples/export_tokenizer_example.py`](examples/export_tokenizer_example.py):
 
