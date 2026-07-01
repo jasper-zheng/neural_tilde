@@ -26,8 +26,7 @@ This package has two families of Max objects:
 
 **Note:** Currently only available for MaxMSP on Apple Silicon, macOS. For Windows/CUDA, it's on the todo list. 
 
-**Acknowledgement:** `neural.live~` and its `mc`, `mcs` variants reused an extensive amount of code from [`nn~`](https://github.com/acids-ircam/nn_tilde), migrated from TorchScript/libtorch to more modern ExecuTorch. `nn~` is the work by Antoine Caillon & Axel Chemla--Romeu-Santos (acids-ircam), licensed **CC BY-NC 4.0**.
-
+**Acknowledgement:** `neural.live~` and its `mc`, `mcs` variants reused an extensive amount of code from [`nn~`](https://github.com/acids-ircam/nn_tilde), migrated from TorchScript/libtorch to more modern ExecuTorch. See [Migrate from `nn~`](#migrate-from-nn). `nn~` is the work by Antoine Caillon & Axel Chemla--Romeu-Santos (acids-ircam), licensed **CC BY-NC 4.0**. 
 
 
 ## Table of Contents
@@ -363,11 +362,35 @@ The full input-role / sidecar template is in [PROTOCOL.md](PROTOCOL.md).
 
 ## Migrate from `nn~`
 
+The `neural.*~` package originated from [`nn~`](https://github.com/acids-ircam/nn_tilde) (Antoine Caillon & Axel Chemla--Romeu-Santos, ACIDS-IRCAM). The underlying framework moved from **TorchScript** (deprecated in PyTorch 2.10) to **[ExecuTorch](https://docs.pytorch.org/executorch/stable/index.html)**, with:
+ - Hardware acceleration on Apple Silicon (via CoreML, MLX, or XNNPack), 
+ - A new offline generation object (`neural.gen~`), 
+ - Better support for modern generative models' input types (text, noise, condition),
+ - A new JSON model metadata.
+
+See the table below for a comparison of the two packages:
+
+| |`neural.*~`|`nn~`|
+|---|---|---|
+| Offline generation | ✅ `neural.gen~` | ❌ |
+| Real-time streaming | ✅ `neural.live~` | ✅ |
+| Input types | ✅ `signal`, `attribute`, `condition`, `noise`, `buffer` | ❌ only `signal` + `attribute` |
+| Attributes | ✅ Added as native Max attributes | ❌ use `set` / `get` messages |
+| Backends | ✅ CoreML, XNNPack, MLX, Portable | ❌ only TorchScript |
+| Dynamic device | ❌ Fixed when exporting | ✅ Can be switched in runtime |
+| Dynamic buffer size | ❌ Fixed when exporting | ✅ Specified as an argument |
+| Library | ExecuTorch | TorchScript (deprecated in PyTorch 2.10) |
+| Python Tools | `pip install neural_tilde` | `pip install nn_tilde` |
+
+### Migration tool for RAVEs
+
 If you have a RAVE TorchScript (`.ts`) model exported for `nn~`, you can migrate it to `neural.live~` with the helper in [`python_tools/migrate.py`](python_tools/migrate.py):
 
 ```bash
 python -m neural_tilde.migrate musicnet.ts --out musicnet --delegate coreml
 ```
+
+**Note:** This is experimental, migration is not guaranteed to succeed on all models. It also disables the prior methods if your model has one. It also disable the noise-synth if it has one (e.g., the one used in many percussion models).
 
 ## Build the externals from source
 
