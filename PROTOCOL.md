@@ -89,9 +89,6 @@ Output roles (a method emits exactly one audio output):
 | `signal` | live | Upsample the model's audio output by `ratio` (repeat-interleave) and write it to the signal outlets (§3). |
 | `audio` | gen | Write `channels × length` PCM (channel-major: all of ch0, then ch1, …) into a `buffer~` at `sample_rate`, then signal completion (§4). |
 
-**Inlets.** The host creates one inlet/control per input by role: `signal` → signal inlets (live); `condition` → one control inlet each, in declared order; `attribute` → a Max attribute (not an inlet); `noise` → no inlet, host-filled (but a `noise` MAY gain a matrix inlet, §2.4.2). The output geometry gives the outlets.
-
-**Batch / mc.** `noise` and `condition` tensors are `[n_batches] + shape[1:]` — the sidecar's leading dim is a batch placeholder of `1`, replicated to the host's batch count (the `mc.`/`mcs.` variants); a `condition`'s `list` therefore carries `shape[1:]` values.
 
 #### 2.4.1 Condition shapes
 
@@ -109,7 +106,7 @@ A `noise` input whose `shape` folds to `[planes × H × W]` (planes ≤ 32) can 
 
 With the toggle **off** (default) or no valid matrix, the input stays **seeded** (gen) / drawn from its seeded stream (live, §2.4). `neural.gen~` reads the matrix once per `generate()`; `neural.live~` feeds the latest matrix every block while the toggle is on.
 
-> This is purely consumer-side: nothing is emitted in the sidecar. A noise input with a compatible shape is automatically picked up according to its `shape`/`dtype`. Max has a maximum of 32 planes for `jit.matrix`, so a noise input that folds to **>32 planes** cannot be fed from an inlet and stays seeded.
+
 
 **Note:** the matrix inlet expects **standard-normal `N(0,1)`** values, but `jit.noise` emits **uniform `[0,1]`**. Put a **`[neural.gaussianize]`** object to convert uniform `[0,1]` to standard-normal `N(0,1)` before feeding it to the noise inlet.
 

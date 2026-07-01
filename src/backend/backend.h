@@ -94,6 +94,11 @@ class Backend {
 protected:
   std::unique_ptr<executorch::extension::Module> m_module;
   int m_loaded;
+  // True once the sidecar JSON has been parsed (the model's I/O is known),
+  // regardless of whether the .pte program is present. A model that ships only
+  // its sidecar is metadata_loaded but not loaded: the host can build its
+  // inlets/attributes, but it cannot run.
+  bool m_metadata_loaded{false};
   std::string m_path;
   std::mutex m_model_mutex;
 
@@ -142,7 +147,13 @@ public:
 
   int load(std::string path);
   int reload();
+  // True only when the .pte program is present and the model can run. Gates
+  // execution (perform / generate).
   bool is_loaded();
+  // True once the sidecar JSON is parsed (the model's I/O is known), even if the
+  // .pte program is missing. Gates inlet/attribute setup in the frontends, so a
+  // sidecar-only model still creates its I/O while staying disabled.
+  bool has_metadata();
 
   std::vector<std::string> get_available_methods();
   std::vector<int> get_method_params(std::string method);

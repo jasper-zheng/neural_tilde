@@ -40,6 +40,7 @@
 #include "../shared/cond_bytes.h"
 #include "../shared/cond_label.h"   // cond_inlet_label
 #include "../shared/matrix_noise.h" // MatrixNoise, detect_matrix_noise, read_jit_matrix
+#include "../shared/neural_common.h" // resolve_model_pte
 #include "c74_min.h"
 
 #include <algorithm>
@@ -98,7 +99,7 @@ public:
 
   // ---- documentation-only arguments --------------------------------------
   argument<symbol> path_arg{this, "model path",
-                            "Path to the generative .pte (with its .json beside "
+                            "Path to the .pte model (with its .json beside "
                             "it)."};
   argument<symbol> method_arg{this, "method",
                               "Method to call (default \"forward\")."};
@@ -232,7 +233,10 @@ private:
   GenRunner m_runner;
   std::string m_method{"forward"};
   OutputSpec m_out_spec;
+  // m_loaded: the sidecar parsed, so the I/O (inlets/attributes) is known.
+  // m_runnable: the .pte program is also present, so generation is possible.
   bool m_loaded{false};
+  bool m_runnable{false};
 
   // One message inlet per condition-role input, in sidecar order, created in the
   // constructor (ctor) (Max can't add inlets later). m_cond_inlets[i] is
@@ -381,26 +385,37 @@ void gen::add_dynamic_attributes() {
 
 void gen::load_model(std::string model_path) {
   m_loaded = false;
-  if (model_path.size() < 4 || model_path.substr(model_path.size() - 4) != ".pte")
-    model_path += ".pte";
+  m_runnable = false;
   try {
-    path resolved(model_path); // resolve via Max search path
-    std::string abs = std::string(resolved);
+    // Resolve the mandatory .json sidecar and derive the sibling .pte path.
+    // In the case of .json loaded but .pte missing: the backend loads metadata-only and stays disabled.
+    std::string abs = resolve_model_pte(model_path);
+    if (abs.empty()) {
+      cerr << "could not find model .json for " << model_path << endl;
+      return;
+    }
     if (m_runner.load(abs)) {
       cerr << "error loading " << abs << endl;
       return;
     }
     if (!m_runner.is_generative()) {
-      cerr << abs << " is not a generative model (use neural.live~ for streaming models)"
+      cerr << abs << " is not a .gen~ model (use neural.live~ for streaming models)"
            << endl;
       return;
     }
     m_out_spec = m_runner.output_spec(m_method);
-    m_loaded = true;
+    m_loaded = true;                      // sidecar parsed: I/O is known
+    m_runnable = m_runner.runnable();     // .pte present: generation possible
     detect_matrix_noise();    // find matrix-drivable noise inputs (for attrs)
     build_condition_meta();   // re-resolve condition inlets + reset cache (reload-safe)
     add_dynamic_attributes(); // expose the model's scalar params as attributes
-    cout << "loaded " << abs << endl;
+    if (m_runnable) {
+      cout << "loaded " << abs << endl;
+    } else {
+      cerr << "no .pte program is loaded, generation is disabled"
+           << endl;
+      cout << "loaded metadata for " << abs << endl;
+    }
   } catch (...) {
     cerr << "could not resolve " << model_path << endl;
   }
@@ -511,12 +526,7 @@ gen::gen(const atoms &args) {
   if (args.size() > 2)
     m_buffer.set(symbol(args[2]));
 
-  // One inlet per condition-role input, in sidecar order. Max fixes the inlet
-  // count at construction, so this is derived from the box-arg model; a later
-  // `reload` to a model with a different condition count keeps these inlets (the
-  // by-name dictionary path still reaches every condition regardless). The
-  // leftmost inlet also carries the control messages; with no conditions (or no
-  // model) a single control inlet remains. m_cond_inlets was filled by load_model
+  // One inlet per condition-role input, in sidecar order. m_cond_inlets was filled by load_model
   // above (build_condition_meta), the same way m_matrix_noise is.
   if (m_cond_inlets.empty()) {
     m_inlets.push_back(std::make_unique<inlet<>>(
@@ -539,8 +549,7 @@ gen::gen(const atoms &args) {
   }
 
   // One extra inlet per matrix-drivable noise input (after the condition
-  // inlets), accepting a jit_matrix; like the condition inlets these are fixed
-  // at construction, so they derive from the box-arg model. The toggle
+  // inlets), accepting a jit_matrix. The toggle
   // `@<name>_inlet` decides whether the matrix or the seed is used per generate.
   {
     int base = (int)m_inlets.size();
@@ -686,6 +695,10 @@ void gen::receive_matrix(const atoms &args, int inlet) {
 void gen::trigger() {
   if (!m_loaded) {
     cerr << "no model loaded" << endl;
+    return;
+  }
+  if (!m_runnable) {
+    cerr << ".pte program is not loaded, cannot generate" << endl;
     return;
   }
   if (m_busy.exchange(true)) {

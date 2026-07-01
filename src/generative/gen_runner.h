@@ -77,6 +77,10 @@ public:
   // Facade over the owned Backend so callers never reach through to it: method
   // listing, typed input/output descriptors.
   bool is_generative() { return m_backend.is_generative(); }
+  // True when the .pte program is present and the model can actually generate
+  // (vs. has_metadata(): the sidecar parsed, so the host can build its I/O).
+  bool runnable() { return m_backend.is_loaded(); }
+  bool has_metadata() { return m_backend.has_metadata(); }
   bool has_method(const std::string &method) {
     return m_backend.has_method(method);
   }

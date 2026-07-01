@@ -47,7 +47,9 @@ public:
   std::string m_method;
   std::vector<std::string> settable_attributes;
   bool has_settable_attribute(std::string attribute);
-  c74::min::path m_path;
+  // Absolute path to the model's .pte (derived from its .json sidecar via
+  // resolve_model_pte; the .pte may be absent — see backend load()).
+  std::string m_path;
   int m_in_dim, m_in_ratio, m_out_dim, m_out_ratio, m_higher_ratio, m_batches;
 
   // BUFFER RELATED MEMBERS
@@ -232,10 +234,14 @@ mcs_live::mcs_live(const atoms &args)
     return;
   }
   if (args.size() > 0) { // ONE ARGUMENT IS GIVEN
-    auto model_path = std::string(args[0]);
-    if (model_path.substr(model_path.length() - 4) != ".pte")
-      model_path = model_path + ".pte";
-    m_path = path(model_path);
+    // Resolve the mandatory .json sidecar; derive the sibling .pte (which may be
+    // absent — the backend then loads metadata-only and stays disabled).
+    m_path = resolve_model_pte(std::string(args[0]));
+    if (m_path.empty()) {
+      cerr << "could not find model .json for " << std::string(args[0]) << endl;
+      error();
+      return;
+    }
   }
   if (args.size() > 1) { // TWO ARGUMENTS ARE GIVEN
     m_method = std::string(args[1]);
@@ -247,11 +253,18 @@ mcs_live::mcs_live(const atoms &args)
     m_buffer_size = int(args[3]);
   }
 
-  // TRY TO LOAD MODEL
-  if (m_model->load(std::string(m_path))) {
+  // TRY TO LOAD MODEL (returns non-zero only if the sidecar itself can't parse).
+  if (m_model->load(m_path)) {
     cerr << "error during loading" << endl;
     error();
     return;
+  }
+
+  // Sidecar parsed but the .pte may be missing: build the I/O below, but the
+  // model stays disabled (enable_model can't turn on).
+  if (m_model->has_metadata() && !m_model->is_loaded()) {
+    cerr << "no .pte program is loaded, inference is disabled"
+         << endl;
   }
 
   // FIND MINIMUM BUFFER SIZE GIVEN MODEL RATIO

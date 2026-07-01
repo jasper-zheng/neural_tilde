@@ -76,7 +76,8 @@ static Role parse_role(const std::string &s) {
 }
 
 Backend::Backend()
-    : m_loaded(0), m_buffer_size(0), m_generative(false), m_seed(0) {}
+    : m_loaded(0), m_metadata_loaded(false), m_buffer_size(0),
+      m_generative(false), m_seed(0) {}
 
 bool Backend::load_metadata(const std::string &pte_path) {
   // Sidecar lives next to the .pte with the same basename and a .json suffix.
@@ -214,13 +215,34 @@ bool Backend::load_metadata(const std::string &pte_path) {
 }
 
 int Backend::load(std::string path) {
+  // Parse the sidecar FIRST: without it we know nothing about the model's I/O
+  // and cannot even build the host's inlets/attributes. A failure here is the
+  // only hard error — the caller has nothing to set up.
+  m_loaded = 0;
+  m_metadata_loaded = false;
+  if (!load_metadata(path)) {
+    std::cerr << "neural: could not load metadata for " << path << std::endl;
+    return 1;
+  }
+  m_metadata_loaded = true;
+  m_path = path;
+
+  // Is the program (.pte) actually on disk? A sidecar MAY ship without it; we
+  // keep the parsed metadata (so the host can still create inlets/attributes)
+  // but mark the model non-runnable and report it. is_loaded() stays false.
+  std::ifstream pte_file(path, std::ios::binary);
+  if (!pte_file.good()) {
+    std::cerr << "neural: program \"" << path
+              << "\" not found — metadata loaded, but the model is disabled "
+                 "(provide the .pte to enable it)"
+              << std::endl;
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    m_module.reset();
+    return 0; // success enough to set up I/O; not runnable
+  }
+
   try {
     auto module = std::make_unique<Module>(path);
-
-    if (!load_metadata(path)) {
-      std::cerr << "neural: could not load metadata for " << path << std::endl;
-      return 1;
-    }
 
     // Best-effort: warn if the .pte's runnable methods diverge from the JSON.
     try {
@@ -239,18 +261,22 @@ int Backend::load(std::string path) {
     m_module = std::move(module);
     m_loaded = 1;
     model_lock.unlock();
-
-    m_path = path;
     return 0;
   } catch (const std::exception &e) {
+    // The metadata is still usable, so treat a program-load failure like a
+    // missing program: set up I/O but stay disabled.
     std::cerr << e.what() << '\n';
-    return 1;
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    m_module.reset();
+    return 0;
   }
 }
 
 int Backend::reload() { return load(m_path); }
 
 bool Backend::is_loaded() { return m_loaded; }
+
+bool Backend::has_metadata() { return m_metadata_loaded; }
 
 int Backend::get_buffer_size() { return m_buffer_size; }
 

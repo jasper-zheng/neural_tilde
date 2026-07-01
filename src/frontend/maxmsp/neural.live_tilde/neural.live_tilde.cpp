@@ -48,7 +48,9 @@ public:
   std::unique_ptr<Backend> m_model;
   bool m_is_backend_init = false;
   std::string m_method;
-  c74::min::path m_path;
+  // Absolute path to the model's .pte program (derived from its .json sidecar via
+  // resolve_model_pte; the .pte itself may be absent — see backend load()).
+  std::string m_path;
   int m_in_dim, m_in_ratio, m_out_dim, m_out_ratio, m_higher_ratio;
 
   // DYNAMIC ATTRIBUTES --------------------------------------------------------
@@ -208,12 +210,17 @@ public:
                         m_model = std::make_unique<Backend>();
                     } catch (...) {
                         }
-                    auto model_path = std::string(args[0]);
-                    if (model_path.substr(model_path.length() - 4) != ".pte")
-                      model_path = model_path + ".pte";
-                    m_path = path(model_path);
+                    // Resolve the sidecar and derive the sibling .pte (which may
+                    // be absent — load() then keeps metadata-only, model disabled).
+                    m_path = resolve_model_pte(std::string(args[0]));
+                    if (m_path.empty()) {
+                        cerr << "could not find model .json for "
+                             << std::string(args[0]) << endl;
+                        error();
+                        return {};
+                    }
                     try {
-                        if (m_model->load(std::string(m_path))) {
+                        if (m_model->load(m_path)) {
                             cerr << "error during loading" << endl;
                             error();
                             return {};
@@ -221,6 +228,10 @@ public:
                     }
                         catch (...) {
                         }
+                    if (m_model->has_metadata() && !m_model->is_loaded()) {
+                        cerr << "no .pte program is loaded, inference is disabled"
+                             << endl;
+                    }
                     
                     try {
                         m_higher_ratio = m_model->get_higher_ratio();
@@ -388,10 +399,14 @@ live::live(const atoms &args)
     return;
   }
   if (args.size() > 0) { // ONE ARGUMENT IS GIVEN
-    auto model_path = std::string(args[0]);
-    if (model_path.substr(model_path.length() - 4) != ".pte")
-      model_path = model_path + ".pte";
-    m_path = path(model_path);
+    // Resolve the mandatory .json sidecar and derive the sibling .pte path (which
+    // may be absent — the backend then loads metadata-only and stays disabled).
+    m_path = resolve_model_pte(std::string(args[0]));
+    if (m_path.empty()) {
+      cerr << "could not find model .json for " << std::string(args[0]) << endl;
+      error();
+      return;
+    }
   }
   if (args.size() > 1) { // TWO ARGUMENTS ARE GIVEN
     m_method = std::string(args[1]);
@@ -400,11 +415,18 @@ live::live(const atoms &args)
     m_buffer_size = int(args[2]);
   }
 
-  // TRY TO LOAD MODEL
-  if (m_model->load(std::string(m_path))) {
+  // TRY TO LOAD MODEL (returns non-zero only if the sidecar itself can't parse).
+  if (m_model->load(m_path)) {
     cerr << "error during loading" << endl;
     error();
     return;
+  }
+
+  // The sidecar parsed but the .pte program may be missing: build the I/O below
+  // from metadata, but the model stays disabled (enable_model can't turn on).
+  if (m_model->has_metadata() && !m_model->is_loaded()) {
+      cerr << "no .pte program is loaded, inference is disabled"
+         << endl;
   }
 
   m_higher_ratio = m_model->get_higher_ratio();
@@ -587,7 +609,7 @@ void live::add_dynamic_attributes() {
     c74::max::object_deleteattr(self, c74::max::gensym(s.name.c_str()));
   m_attr_slots.clear();
   m_attr_live.clear();
-  if (!m_model || !m_model->is_loaded())
+  if (!m_model || !m_model->has_metadata())
     return;
 
   // Populate slots + live values first so the setter (fired by the default-set
@@ -725,7 +747,7 @@ void live::build_condition_meta() {
   m_cond_snapshot.clear();
   m_supplied.clear();
   m_cond_dirty.store(false);
-  if (!m_model || !m_model->is_loaded())
+  if (!m_model || !m_model->has_metadata())
     return;
   for (const auto &in : m_model->method_inputs(m_method)) {
     if (in.role != Role::Condition)
@@ -863,7 +885,7 @@ void live::build_matrix_noise_meta() {
   }
   m_noise_snapshot.clear();
   m_noise_dirty.store(false);
-  if (!m_model || !m_model->is_loaded())
+  if (!m_model || !m_model->has_metadata())
     return;
   m_matrix_noise = detect_matrix_noise(m_model->method_inputs(m_method), cerr);
 }
@@ -900,7 +922,7 @@ void live::snapshot_noise() {
 // the shared reader into the control-side m_noise[name]. `inlet` is the arriving
 // absolute inlet index, mapped to a noise name by m_noise_inlet_name.
 void live::receive_matrix(const atoms &args, int inlet) {
-  if (!m_model || !m_model->is_loaded()) {
+  if (!m_model || !m_model->has_metadata()) {
     cerr << "no model loaded" << endl;
     return;
   }
@@ -946,7 +968,7 @@ void live::add_noise_inlet_attributes() {
   for (const auto &n : m_noise_attr_slots) // drop a previous model's toggles
     c74::max::object_deleteattr(self, c74::max::gensym(n.c_str()));
   m_noise_attr_slots.clear();
-  if (!m_model || !m_model->is_loaded())
+  if (!m_model || !m_model->has_metadata())
     return;
   for (const auto &nz : m_matrix_noise) {
     {

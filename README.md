@@ -16,6 +16,7 @@ This package has two families of Max objects:
 | `neural.gen~` | Neural synthesis with one-shot offline generation (e.g. latent-diffusion text-to-audio, audio-to-audio...) |
 | `neural.tokenizer` | [Utility] Tokenize a text prompt into token IDs and attention mask |
 | `neural.gaussianize` | [Utility] Map uniform `jit.noise` to Gaussian noise |
+| `neural.info` | [Utility] Inspect a model's inlets/outlets, attributes, conditions, etc. |
 
 **Supported models:**  
  - [Live] [RAVE-CoreML](https://github.com/jasper-zheng/RAVE-CoreML) A streamable codec for timbre transfer / latent-space audio manipulation
