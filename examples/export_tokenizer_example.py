@@ -1,7 +1,6 @@
 """Minimal example: bundle a HuggingFace tokenizer for ``neural.tokenizer`` in Max.
 
-No model or export needed — just wrap an existing ``tokenizer.json`` into the two
-sidecar files that ``neural.tokenizer`` loads.
+No model or export needed — just wrap an existing ``tokenizer.json`` into files that ``neural.tokenizer`` loads.
 
 Run::
 

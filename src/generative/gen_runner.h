@@ -17,7 +17,7 @@
 // drive a latent-diffusion model directly. Data-driven; no model-specific code.
 class GenRunner {
 public:
-  // Load the .pte (+ sidecar). Returns 0 on success, non-zero on failure.
+  // Load the .pte (+ metadata). Returns 0 on success, non-zero on failure.
   int load(const std::string &pte_path);
   bool ready() const { return m_ready; }
 
@@ -35,7 +35,7 @@ public:
   // by name, ready to pass as `supplied` to generate(). `cond` maps an input's
   // name to its raw bytes already in that input's declared dtype (the role no
   // longer says which tensor — matching is purely by name, dtype comes from the
-  // sidecar). The byte buffers must outlive the generate() call. Shared by every
+  // metadata). The byte buffers must outlive the generate() call. Shared by every
   // caller so the name->input mapping lives in exactly one place.
   static void
   bind_condition(const std::vector<InputSpec> &inputs,
@@ -78,7 +78,7 @@ public:
   // listing, typed input/output descriptors.
   bool is_generative() { return m_backend.is_generative(); }
   // True when the .pte program is present and the model can actually generate
-  // (vs. has_metadata(): the sidecar parsed, so the host can build its I/O).
+  // (vs. has_metadata(): the metadata parsed, so the host can build its I/O).
   bool runnable() { return m_backend.is_loaded(); }
   bool has_metadata() { return m_backend.has_metadata(); }
   bool has_method(const std::string &method) {

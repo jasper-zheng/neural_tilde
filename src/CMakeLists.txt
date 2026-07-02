@@ -38,8 +38,8 @@ if(APPLE)
     # Pure Max/Jitter helper (uniform->N(0,1) probit). No ExecuTorch/Rust, so it
     # lives outside the tokenizer guard.
     add_subdirectory(frontend/maxmsp/neural.gaussianize)
-    # Pure Max helper: reads a model .json sidecar and emits its metadata as a
-    # Max dictionary. No ExecuTorch/Rust, so it also lives outside the guard.
+    # Pure Max helper: reads a model .json metadata file and emits its contents
+    # as a Max dictionary. No ExecuTorch/Rust, so it also lives outside the guard.
     add_subdirectory(frontend/maxmsp/neural.info)
     if(NN_ENABLE_TOKENIZER)
         # Generative latent-diffusion runner (needs gen_runner = backend only).

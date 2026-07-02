@@ -154,7 +154,7 @@ int GenRunner::generate(const std::string &method,
 
     switch (spec.role) {
     case Role::Attribute: {
-      // Scalar attribute: the caller's value by name, else the sidecar default.
+      // Scalar attribute: the caller's value by name, else the metadata default.
       auto av = attr_values.find(spec.name);
       double raw = (av != attr_values.end()) ? av->second : spec.def;
       double lo = spec.min, hi = spec.max;

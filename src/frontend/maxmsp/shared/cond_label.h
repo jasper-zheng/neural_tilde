@@ -2,7 +2,7 @@
 // Condition-inlet label helper shared by the externals that create one message
 // inlet per `condition`-role model input (neural.gen~ and neural.live~). Renders
 // an inlet's assist string from its InputSpec so a user hovering the inlet sees
-// the tensor it expects — name, shape, dtype, and the optional sidecar
+// the tensor it expects — name, shape, dtype, and the optional metadata
 // description — instead of just the name. Mirrors how matrix_noise.h embeds a
 // noise input's geometry in its inlet label. The per-object inlet wiring stays in
 // each external; only the descriptor formatting lives here.
@@ -33,7 +33,7 @@ inline std::string cond_shape_str(const std::vector<int> &shape) {
 }
 
 // The descriptor for a condition input's inlet: "<name> (<shape>) <dtype>", with
-// ": <description>" appended only when the sidecar supplied one. Callers append
+// ": <description>" appended only when the metadata supplied one. Callers append
 // their own trailer (e.g. " (list, or dictionary by name)").
 inline std::string cond_inlet_label(const InputSpec &in) {
   std::string s = in.name + " " + cond_shape_str(in.shape) + " " +

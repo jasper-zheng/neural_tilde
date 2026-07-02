@@ -1,4 +1,4 @@
-# neural.info — read a model's .json sidecar and emit it as a Max dictionary. A
+# neural.info — read a model's .json metadata and emit it as a Max dictionary. A
 # pure Max object: links NO libraries (no ExecuTorch, no MLX, no tokenizer/Rust).
 # The Max dictionary C API symbols resolve at load from the Max host, like the
 # other objects.

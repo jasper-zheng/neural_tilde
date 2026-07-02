@@ -1,5 +1,5 @@
 """neural_tilde — export PyTorch neural-audio models to ExecuTorch ``.pte`` +
-sidecar JSON for the ``neural.live~`` / ``neural.gen~`` Max externals.
+metadata JSON for the ``neural.live~`` / ``neural.gen~`` Max externals.
 
 Both exporters register the model's extra inputs by name (attributes / noise / conditions,
 plus gen's init buffer), then declare one or more ``register_method`` generation/processing

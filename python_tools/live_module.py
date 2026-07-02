@@ -9,7 +9,7 @@ per-block multi-channel audio) followed by the extra inputs it consumes, each ta
     ``noise``     — a tensor the host fills with per-block ``N(0,1)``;
     ``condition`` — a held control vector the patch supplies by list / dictionary.
 
-``export_to_pte`` writes the ``.pte`` + a ``kind:"live"`` sidecar JSON; the output is a single
+``export_to_pte`` writes the ``.pte`` + a ``kind:"live"`` metadata JSON; the output is a single
 ``signal`` tensor. A method may carry mutable state that persists across blocks (e.g.
 ``cached_conv`` caches) so consecutive blocks join click-free. See ``examples/export_live_example.py``.
 
@@ -216,7 +216,7 @@ class LiveModule(_ExporterBase):
     # ------------------------------------------------------------------ export
 
     def _method_inputs(self, name: str, in_channels: int, in_ratio: int) -> list:
-        """The ordered sidecar ``inputs`` list for a method: the signal entry first,
+        """The ordered metadata ``inputs`` list for a method: the signal entry first,
         then one entry per registered extra input the method consumes."""
         signal = {"name": "signal", "role": "signal",
                   "channels": int(in_channels), "ratio": int(in_ratio),
@@ -227,7 +227,7 @@ class LiveModule(_ExporterBase):
 
     def _nn_metadata(self, buffer_size: int, delegate: str,
                      executorch_version: str) -> dict:
-        """Build the ``kind:"live"`` sidecar-JSON metadata dict (see EXECUTORCH_PROTOCOL.md).
+        """Build the ``kind:"live"`` metadata JSON dict (see EXECUTORCH_PROTOCOL.md).
 
         Pure metadata: depends only on the registered methods/specs, so it can be built
         (and tested) without executorch installed.
@@ -269,7 +269,7 @@ class LiveModule(_ExporterBase):
                       batch: int = 1,
                       strict: bool = False,
                       warmup: bool = True) -> str:
-        """Export the registered methods to an ExecuTorch ``.pte`` + sidecar JSON.
+        """Export the registered methods to an ExecuTorch ``.pte`` + metadata JSON.
 
         Each registered method becomes one ExecuTorch method taking a
         ``[batch, in_channels, buffer_size // in_ratio]`` float tensor followed by one
@@ -343,7 +343,7 @@ class LiveModule(_ExporterBase):
             f.write(executorch_program.buffer)
         logging.info(f"Wrote ExecuTorch program to {path}")
 
-        self._write_sidecar_json(path, metadata)
+        self._write_metadata_json(path, metadata)
         # If the model takes a text prompt, emit the standalone tokenizer bundle
         # beside the .pte (no-op when no tokenizer was registered).
         self._write_tokenizer_files(path)

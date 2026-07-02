@@ -67,7 +67,7 @@ struct OutputSpec {
   std::vector<std::string> labels;
 };
 
-// Per-method metadata parsed from the sidecar JSON, shared by both kinds.
+// Per-method metadata parsed from the model's JSON, shared by both kinds.
 struct MethodInfo {
   std::vector<InputSpec> inputs; // positional call signature
   OutputSpec output;
@@ -85,7 +85,7 @@ struct SuppliedInput {
   size_t numel;
 };
 
-// Backend wraps an ExecuTorch program (.pte) plus its sidecar JSON metadata.
+// Backend wraps an ExecuTorch program (.pte) plus its JSON metadata.
 // The public API mirrors the previous TorchScript backend so the Max/Pd
 // frontends are essentially unchanged. A live method MAY carry internal mutable
 // state that persists across calls; the host loads one instance per object and
@@ -94,9 +94,9 @@ class Backend {
 protected:
   std::unique_ptr<executorch::extension::Module> m_module;
   int m_loaded;
-  // True once the sidecar JSON has been parsed (the model's I/O is known),
+  // True once the metadata JSON has been parsed (the model's I/O is known),
   // regardless of whether the .pte program is present. A model that ships only
-  // its sidecar is metadata_loaded but not loaded: the host can build its
+  // its metadata is metadata_loaded but not loaded: the host can build its
   // inlets/attributes, but it cannot run.
   bool m_metadata_loaded{false};
   std::string m_path;
@@ -108,7 +108,7 @@ protected:
   std::vector<std::string> m_available_methods;
   int m_buffer_size; // top-level buffer_size the .pte was exported at (live)
 
-  bool m_generative; // true if the sidecar declared kind: "gen"
+  bool m_generative; // true if the metadata declared kind: "gen"
   int m_seed;        // default RNG seed for gen "noise" inputs
 
   // Reusable scratch for perform() so the audio/worker hot path does no per-block
@@ -137,7 +137,7 @@ public:
 
   // attr_values (optional): current value of each Attribute-role input, in
   // declared order; a value not supplied (shorter list / empty) falls back to
-  // the sidecar default, so attribute-less callers (mc/mcs) pass nothing.
+  // the metadata default, so attribute-less callers (mc/mcs) pass nothing.
   // supplied (optional): externally-supplied inputs by name (Condition-role for
   // live); an unsupplied condition is zero-filled.
   void perform(std::vector<float *> in_buffer, std::vector<float *> out_buffer,
@@ -150,9 +150,9 @@ public:
   // True only when the .pte program is present and the model can run. Gates
   // execution (perform / generate).
   bool is_loaded();
-  // True once the sidecar JSON is parsed (the model's I/O is known), even if the
+  // True once the metadata JSON is parsed (the model's I/O is known), even if the
   // .pte program is missing. Gates inlet/attribute setup in the frontends, so a
-  // sidecar-only model still creates its I/O while staying disabled.
+  // metadata-only model still creates its I/O while staying disabled.
   bool has_metadata();
 
   std::vector<std::string> get_available_methods();
@@ -171,7 +171,7 @@ public:
   const std::vector<InputSpec> &method_inputs(const std::string &method);
   OutputSpec method_output(const std::string &method);
   int gen_seed();
-  // Set the base RNG seed for noise inputs (the sidecar `seed` is the default).
+  // Set the base RNG seed for noise inputs (the metadata `seed` is the default).
   // For a live model this reseeds each noise input's persistent stream from
   // (seed, name) on the next perform(), so seeded noise restarts deterministically;
   // gen reads it via gen_seed() per generate(). Safe to call from a control thread.

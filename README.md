@@ -53,7 +53,7 @@ This package has two families of Max objects:
 ## How It Works
 
  - **Export**: Export a PyTorch neural audio model using [ExecuTorch](https://docs.pytorch.org/executorch/main/getting-started.html), with a target hardware backend (see below). This results in a `.pte` (the runnable program + weights) file.  
- - **Config**: Create a `.json` sidecar that details inlet/outlet, ratio, attributes, condition shapes, etc. 
+ - **Config**: Create a `.json` metadata file that details inlet/outlet, ratio, attributes, condition shapes, etc. 
  - **Load**: Hand `neural.live~` / `neural.gen~` the `.pte` and `.json` files in Max.
 
 ### Supported back-ends:
@@ -115,18 +115,18 @@ You can pass `neural.tokenizer` the `*.tokenizer.json`.
 ### `neural.live~`:
 
 - **Arguments:** `[neural.live~ <model.pte> <method>]`. 
-- **Signal inlets / outlets** are created according to the `.json` sidecar. 
-- **Conditions / attributes / noise** (if any) are created according to the `.json` sidecar (see [Input Roles](#input-roles)).
+- **Signal inlets / outlets** are created according to the `.json` metadata. 
+- **Conditions / attributes / noise** (if any) are created according to the `.json` metadata (see [Input Roles](#input-roles)).
 - **Turn computation on:** the `enable_model` attribute defaults to **off**, so the
   object outputs silence until you set `enable_model` to 1
-- **Buffer size** is read from the model's `.json` sidecar, this is **fixed when the model is exported**.
+- **Buffer size** is read from the model's `.json` metadata, this is **fixed when the model is exported**.
 
 
 ### `neural.gen~`:
 
 - **Arguments:** `[neural.gen~ <model.pte> <method> <buffer>]`.
 - **Buffer**: Create a `buffer~` to hold the generated outputs, set its name to `neural.gen~` by the third argument, or with the `set <buffer>` message. 
-- **Conditions / attributes / noise** (if any) are created according to the `.json` sidecar (see [Input Roles](#input-roles)).
+- **Conditions / attributes / noise** (if any) are created according to the `.json` metadata (see [Input Roles](#input-roles)).
 
 > **Notes.** A `buffer~` carries Max's project sample-rate while the mode might have a fixed rate. If your patch runs at a different rate, the data is correct but plays back at the wrong pitch.
 
@@ -161,7 +161,7 @@ Diffusion models often requires Gaussian noise as inputs. However, `jit.noise` /
 
 `neural.live~` and `neural.gen~` run model exported from PyTorch, it needs:
  - `*.pte` the model weights + program
- - `*.json` the sidecar config defining model's inlets/outlets, attributes, conditions, etc.
+ - `*.json` the metadata defining model's inlets/outlets, attributes, conditions, etc.
 
 They should have **the same** filename, put together in a folder. 
 
@@ -171,7 +171,7 @@ They should have **the same** filename, put together in a folder.
 | file | what it is |
 | --- | --- |
 | `my_diffusion.pte` | the ExecuTorch program + weights |
-| `my_diffusion.json` | model sidecar: typed inputs/output (no tokenizer settings) |
+| `my_diffusion.json` | model metadata: typed inputs/output (no tokenizer settings) |
 
 
 **Tokenizer:** If your model uses a prompt-based inputs (e.g. Stable Audio 3), the exported model also has a tokenizer bundle:
@@ -184,13 +184,11 @@ They should have **the same** filename, put together in a folder.
 
 ### Methods
 
-A model may expose **several methods** with different inputs (e.g. `prompt2audio` and `audio2audio` for diffusion models, or `encode` and `decode` for codecs). `neural.gen/live~` selects only one when initialized. 
-
-Methods are declared in the model's `.json` sidecar, see [PROTOCOL.md - 2.3 Sidecar JSON template](PROTOCOL.md#23-sidecar-json-template) for details.
+A model may expose **several methods** with different inputs (e.g. `prompt2audio` and `audio2audio` for diffusion models, or `encode` and `decode` for codecs). `neural.gen/live~` selects only one when initialized. A method may have several inputs, each with a role, see below.
 
 ### Input Roles
 
-A method may take **several inputs**, each with a **role**. The role is declared in the model's `.json` sidecar, see [PROTOCOL.md - 2.3 Sidecar JSON template](PROTOCOL.md#23-sidecar-json-template) for details.  
+A method may take **several inputs**, each with a **role**. The role is declared in the model's `.json` metadata, see [PROTOCOL.md 2.4 Input Roles](PROTOCOL.md#24-input-roles) for details.  
 
 **Five input roles are supported:**
 
@@ -220,6 +218,7 @@ pip install neural-tilde
 # Install the `neural_tilde` module, cached_conv, executorch, coremltools
 ```
 
+
 ### Usage:
 
  - Subclass `neural_tilde.LiveModule` / `.GenModule`
@@ -228,8 +227,9 @@ pip install neural-tilde
  - **Register tokenizer [optional]:** If your model has a tokenizer, use `register_tokenizer(...)` to register it. 
  - **Register buffer [optional]:** If your model has a buffer input, use `register_buffer_input(...)` to register it.
  - **Register methods:** use `register_method(...)` register each method and their inputs / outputs. Registered roles are listed in order via the `inputs=[...]` argument; the method takes them after the audio tensor (e.g., `forward(self, x, gain, bias)`). 
- - **Export model:** Use `export_to_pte(..., delegate="coreml")` to export, which will result in the model weights `.pte` and the sidecar `.json`
+ - **Export model:** Use `export_to_pte(..., delegate="coreml")` to export, which will result in the model weights `.pte` and the metadata `.json`
 
+See [PROTOCOL.md 2.4 Input Roles](PROTOCOL.md#24-input-roles) for detailed Python API.
 
 ### Live Example:
 
@@ -283,11 +283,6 @@ Results in:
 
 <img src="assets/mini-live.png" width="600" alt="export_live_example.py output" />
 
-
-<!-- **Why this streams:** `cached_conv` replaces zero-padding with *cached* padding (it
-keeps each conv's previous-block tail in a buffer). On the Core ML delegate those cache
-buffers are taken over as native Core ML **state** that persists across blocks, so
-`neural.live~` runs the model click-free in real time. (MLX does not persist this state, that's why we perfer Core ML instead of MLX) -->
 
 ### Gen Example:
 
@@ -358,7 +353,7 @@ tok.write_files(out_stem)
 
 ## Full Protocol
 
-The full input-role / sidecar template is in [PROTOCOL.md](PROTOCOL.md).
+The full input-role / metadata template is in [PROTOCOL.md](PROTOCOL.md).
 
 ## Migrate from `nn~`
 

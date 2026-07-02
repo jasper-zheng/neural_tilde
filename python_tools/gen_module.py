@@ -4,7 +4,7 @@ The offline-generator exporter; its audio-rate counterpart is :class:`neural_til
 (``neural.live~``). Wrap a ``torch.nn.Module``, register each input **by name** with its role
 (``condition`` / ``attribute`` / ``noise`` / ``buffer``), then ``register_method`` one or more
 generation paths — each listing, in ``forward`` order, the inputs it consumes and the audio it
-produces. ``export_to_pte`` writes the ``.pte`` + a ``kind:"gen"`` sidecar JSON (plus, if a
+produces. ``export_to_pte`` writes the ``.pte`` + a ``kind:"gen"`` metadata JSON (plus, if a
 tokenizer is registered, the ``.tokenizer.json`` / ``.tokenizer.config.json`` bundle the
 ``neural.tokenizer`` object loads). A model may expose several methods (e.g. ``prompt2audio`` +
 ``audio2audio``); the host picks one by name at load time
@@ -114,7 +114,7 @@ class GenModule(_ExporterBase):
         returning a single ``[1, out_channels, out_length]`` audio tensor.
 
         Args:
-            method_name: name of the method (= the sidecar ``methods{}`` key the host selects)
+            method_name: name of the method (= the metadata ``methods{}`` key the host selects)
             inputs: ordered names of the inputs the method consumes
             out_channels/out_length/out_sample_rate: the audio output geometry
             out_name/out_dtype: output tensor name / dtype (``float32``)
@@ -158,7 +158,7 @@ class GenModule(_ExporterBase):
         return self._model(*inputs)
 
     def _gen_metadata(self, delegate: str, executorch_version: str) -> dict:
-        """Build the ``kind:"gen"`` sidecar dict (see EXECUTORCH_PROTOCOL.md §3).
+        """Build the ``kind:"gen"`` metadata dict (see EXECUTORCH_PROTOCOL.md §3).
 
         Pure metadata — depends only on the registered specs, so it can be built (and
         tested) without executorch installed. One entry per registered method, each with
@@ -189,7 +189,7 @@ class GenModule(_ExporterBase):
                       graph_transforms: Sequence[Callable[[ExportedProgram],
                                                           ExportedProgram]] = (),
                       decompose_conv: bool = False) -> str:
-        """Export every registered method to an ExecuTorch ``.pte`` + sidecar (+ tokenizer) JSON.
+        """Export every registered method to an ExecuTorch ``.pte`` + metadata (+ tokenizer) JSON.
 
         Each registered method becomes one ExecuTorch method traced with one zero example
         tensor per declared input (in order), optionally graph-rewritten, then lowered
@@ -251,7 +251,7 @@ class GenModule(_ExporterBase):
             f.write(executorch_program.buffer)
         logging.info(f"Wrote ExecuTorch program to {path}")
 
-        self._write_sidecar_json(path, metadata)
+        self._write_metadata_json(path, metadata)
         self._write_tokenizer_files(path)
         return path
 

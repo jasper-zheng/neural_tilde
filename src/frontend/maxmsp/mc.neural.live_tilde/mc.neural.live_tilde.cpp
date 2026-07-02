@@ -46,7 +46,7 @@ public:
   std::string m_method;
   std::vector<std::string> settable_attributes;
   bool has_settable_attribute(std::string attribute);
-  // Absolute path to the model's .pte (derived from its .json sidecar via
+  // Absolute path to the model's .pte (derived from its .json metadata via
   // resolve_model_pte; the .pte may be absent — see backend load()).
   std::string m_path;
   int m_in_dim, m_in_ratio, m_out_dim, m_out_ratio, m_higher_ratio;
@@ -70,7 +70,7 @@ public:
 
   // ONLY FOR DOCUMENTATION
   argument<symbol> path_arg{this, "model path",
-                            "Absolute path to the pretrained model."};
+                            "Path to the .pte model (with its .json metadata beside it)."};
   argument<symbol> method_arg{this, "method",
                               "Name of the method to call during synthesis."};
   argument<int> buffer_arg{
@@ -94,7 +94,7 @@ public:
 
   // RNG SEED ATTRIBUTE
   // Base seed for the model's noise inputs (each noise input draws from its own
-  // (seed, name) stream; see Backend::set_seed). The sidecar `seed` is the
+  // (seed, name) stream; see Backend::set_seed). The metadata `seed` is the
   // default, synced after load. (Matrix-noise inlets are not exposed on the mc
   // variant — only the seeded streams.)
     attribute<int> seed {this, "seed", 0,
@@ -250,11 +250,11 @@ mc_live::mc_live(const atoms &args)
     return;
   }
   if (args.size() > 0) { // ONE ARGUMENT IS GIVEN
-    // Resolve the mandatory .json sidecar; derive the sibling .pte (which may be
+    // Resolve the mandatory .json metadata; derive the sibling .pte (which may be
     // absent — the backend then loads metadata-only and stays disabled).
     m_path = resolve_model_pte(std::string(args[0]));
     if (m_path.empty()) {
-      cerr << "could not find model .json for " << std::string(args[0]) << endl;
+      cerr << "could not find model .json metadata for " << std::string(args[0]) << endl;
       error();
       return;
     }
@@ -266,14 +266,14 @@ mc_live::mc_live(const atoms &args)
     m_buffer_size = int(args[2]);
   }
 
-  // TRY TO LOAD MODEL (returns non-zero only if the sidecar itself can't parse).
+  // TRY TO LOAD MODEL (returns non-zero only if the metadata itself can't parse).
   if (m_model->load(m_path)) {
     cerr << "error during loading" << endl;
     error();
     return;
   }
 
-  // Sidecar parsed but the .pte may be missing: build the I/O below, but the
+  // Metadata parsed but the .pte may be missing: build the I/O below, but the
   // model stays disabled (enable_model can't turn on).
   if (m_model->has_metadata() && !m_model->is_loaded()) {
     cerr << "no .pte program is loaded, inference is disabled"
@@ -314,7 +314,7 @@ mc_live::mc_live(const atoms &args)
   m_buffer_size = negotiate_buffer_size(m_buffer_size, m_model->get_buffer_size(),
                                         m_higher_ratio, m_use_thread, cerr);
 
-  // Adopt the sidecar's default seed onto the `seed` attribute (fires set_seed).
+  // Adopt the metadata's default seed onto the `seed` attribute (fires set_seed).
   seed = m_model->gen_seed();
 
   // CREATE INLETS, OUTLETS and BUFFERS

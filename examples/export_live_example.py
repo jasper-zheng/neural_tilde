@@ -67,8 +67,7 @@ def main() -> None:
     model.register_condition("bias", [1, 1], dtype="float32",
                              description="held DC offset added before the net")
 
-    # Registering the method validates the tensor signature AND (test_method=True) runs
-    # one forward per batch mode, which also lazily allocates cached_conv's caches.
+    # Registering the method
     model.register_method(
         "forward",
         in_channels=2,
@@ -80,10 +79,7 @@ def main() -> None:
         inputs=["gain", "bias"]
     )
 
-    # Lower to Core ML (runs on the Apple Neural Engine). Swap to
-    # delegate="xnnpack" for a CPU build that also streams. The cached_conv
-    # caches persist across blocks (taken over as native Core ML state), so the
-    # model streams click-free — no sidecar flag needed.
+    # Lower to Core ML. Swap to delegate="xnnpack" for CPU
     path = model.export_to_pte(out, delegate="coreml", buffer_size=4096, strict=True)
     print(f"wrote {path} and {path[:-4]}.json")
 

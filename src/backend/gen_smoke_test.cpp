@@ -8,7 +8,7 @@
 //
 //   ./gen_smoke_test <model.pte> <method> --io <dir>
 //       Parity gate: read one raw little-endian blob per input from
-//       <dir>/<input-name>.bin (dtype/shape from the sidecar), run generate(),
+//       <dir>/<input-name>.bin (dtype/shape from the metadata), run generate(),
 //       and compare the audio output against <dir>/audio_ref.bin. PASS if
 //       max|Δ| <= 1e-4 (the protocol's C++-vs-Python-.pte gate, §7.6).
 //

@@ -48,14 +48,14 @@ public:
   std::unique_ptr<Backend> m_model;
   bool m_is_backend_init = false;
   std::string m_method;
-  // Absolute path to the model's .pte program (derived from its .json sidecar via
+  // Absolute path to the model's .pte program (derived from its .json metadata via
   // resolve_model_pte; the .pte itself may be absent — see backend load()).
   std::string m_path;
   int m_in_dim, m_in_ratio, m_out_dim, m_out_ratio, m_higher_ratio;
 
   // DYNAMIC ATTRIBUTES --------------------------------------------------------
   // One Max instance attribute per settable scalar the model's method declares,
-  // created from the sidecar at load (the same design as neural.gen~). The model
+  // created from the metadata at load (the same design as neural.gen~). The model
   // consumes each as a trailing scalar input to its forward; the host owns the
   // value. m_attr_slots holds the metadata (name/range/default/description);
   // m_attr_live is the parallel live value, written by the attribute setter
@@ -152,7 +152,7 @@ public:
 
   // ONLY FOR DOCUMENTATION
   argument<symbol> path_arg{this, "model path",
-                            "Absolute path to the pretrained model."};
+                            "Path to the .pte model (with its .json metadata beside it)."};
   argument<symbol> method_arg{this, "method",
                               "Name of the method to call during synthesis."};
   argument<int> buffer_arg{
@@ -176,7 +176,7 @@ public:
 
     // RNG SEED ATTRIBUTE
     // Base seed for the model's noise inputs (each noise input draws from its own
-    // (seed, name) stream; see Backend::set_seed). The sidecar `seed` is the
+    // (seed, name) stream; see Backend::set_seed). The metadata `seed` is the
     // default, synced onto this attribute after load. Changing it restarts the
     // seeded noise deterministically.
     attribute<int> seed {this, "seed", 0,
@@ -210,11 +210,11 @@ public:
                         m_model = std::make_unique<Backend>();
                     } catch (...) {
                         }
-                    // Resolve the sidecar and derive the sibling .pte (which may
+                    // Resolve the metadata and derive the sibling .pte (which may
                     // be absent — load() then keeps metadata-only, model disabled).
                     m_path = resolve_model_pte(std::string(args[0]));
                     if (m_path.empty()) {
-                        cerr << "could not find model .json for "
+                        cerr << "could not find model .json metadata for "
                              << std::string(args[0]) << endl;
                         error();
                         return {};
@@ -251,7 +251,7 @@ public:
                     build_condition_meta();
                     // Re-resolve the matrix-noise inputs + their toggle attributes
                     // (the jit_matrix inlets, fixed at construction, do not change);
-                    // re-sync the seed attribute onto the new sidecar default.
+                    // re-sync the seed attribute onto the new metadata default.
                     build_matrix_noise_meta();
                     add_noise_inlet_attributes();
                     seed = m_model->gen_seed();
@@ -399,11 +399,11 @@ live::live(const atoms &args)
     return;
   }
   if (args.size() > 0) { // ONE ARGUMENT IS GIVEN
-    // Resolve the mandatory .json sidecar and derive the sibling .pte path (which
+    // Resolve the mandatory .json metadata and derive the sibling .pte path (which
     // may be absent — the backend then loads metadata-only and stays disabled).
     m_path = resolve_model_pte(std::string(args[0]));
     if (m_path.empty()) {
-      cerr << "could not find model .json for " << std::string(args[0]) << endl;
+      cerr << "could not find model .json metadata for " << std::string(args[0]) << endl;
       error();
       return;
     }
@@ -415,14 +415,14 @@ live::live(const atoms &args)
     m_buffer_size = int(args[2]);
   }
 
-  // TRY TO LOAD MODEL (returns non-zero only if the sidecar itself can't parse).
+  // TRY TO LOAD MODEL (returns non-zero only if the metadata itself can't parse).
   if (m_model->load(m_path)) {
     cerr << "error during loading" << endl;
     error();
     return;
   }
 
-  // The sidecar parsed but the .pte program may be missing: build the I/O below
+  // The metadata parsed but the .pte program may be missing: build the I/O below
   // from metadata, but the model stays disabled (enable_model can't turn on).
   if (m_model->has_metadata() && !m_model->is_loaded()) {
       cerr << "no .pte program is loaded, inference is disabled"
@@ -516,7 +516,7 @@ live::live(const atoms &args)
   // One `<name>_inlet` boolean attribute per matrix-noise input (toggles the
   // matrix inlet over the seeded stream).
   add_noise_inlet_attributes();
-  // Adopt the sidecar's default seed onto the `seed` attribute (fires set_seed).
+  // Adopt the metadata's default seed onto the `seed` attribute (fires set_seed).
   seed = m_model->gen_seed();
 
   if (m_use_thread)

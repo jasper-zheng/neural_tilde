@@ -30,13 +30,13 @@ from ._tokenizer import Tokenizer
 class _ExporterBase(torch.nn.Module):
     """Common registration/metadata machinery for the two exporters.
 
-    Subclasses own method registration (``register_method``), the sidecar-metadata
+    Subclasses own method registration (``register_method``), the metadata
     builder and ``export_to_pte``; everything here is shared and kind-agnostic.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        # name -> sidecar spec dict, one table per kind of extra (non-signal)
+        # name -> metadata spec dict, one table per kind of extra (non-signal)
         # input. A method lists, in order, which of these its forward consumes
         # after the leading positional input (see _declare_method). ``_buffer_specs``
         # is only ever populated by the generative exporter.
@@ -48,7 +48,7 @@ class _ExporterBase(torch.nn.Module):
         # Optional tokenizer bundle (shared by every method; either exporter may
         # ship one — tokens arrive as ordinary `condition` inputs matched by name).
         self._tokenizer: Optional[Tokenizer] = None
-        # Default RNG seed for "noise" inputs, emitted as a top-level sidecar
+        # Default RNG seed for "noise" inputs, emitted as a top-level metadata
         # field for both kinds. gen re-derives reproducible noise per generate();
         # live seeds one persistent stream per noise input from (seed, name) and
         # advances it per block (the host exposes `seed` as a settable control).
@@ -132,7 +132,7 @@ class _ExporterBase(torch.nn.Module):
     # -------------------------------------------------------------- resolution
 
     def _extra_spec(self, name: str) -> dict:
-        """Resolve a registered extra-input name to its sidecar spec dict."""
+        """Resolve a registered extra-input name to its metadata spec dict."""
         for table in (self._attribute_specs, self._noise_specs,
                       self._condition_specs, self._buffer_specs):
             if name in table:
@@ -221,7 +221,7 @@ class _ExporterBase(torch.nn.Module):
         may use one as well as ``neural.gen~``. On export the ``tokenizer_file`` (a
         ``tokenizer.json``) is copied to ``<stem>.tokenizer.json`` and a
         ``<stem>.tokenizer.config.json`` is written; the bundle is standalone (the
-        model sidecar does not reference it) and shared by every method.
+        model metadata does not reference it) and shared by every method.
 
         ``ids_key`` / ``mask_key`` MUST equal the token-condition input names of
         whichever method consumes the tokens, so ``neural.tokenizer``'s output
@@ -240,18 +240,18 @@ class _ExporterBase(torch.nn.Module):
     def set_seed(self, seed: int) -> None:
         """Set the default RNG seed for the model's ``noise`` inputs (per-model).
 
-        Emitted as the top-level sidecar ``seed`` for both kinds; the host may
+        Emitted as the top-level metadata ``seed`` for both kinds; the host may
         override it at run time (``neural.gen~`` / ``neural.live~`` expose a
         settable ``seed`` control)."""
         self._seed = int(seed)
 
     # ------------------------------------------------------------------ output
 
-    def _write_sidecar_json(self, pte_path: str, metadata: dict) -> str:
+    def _write_metadata_json(self, pte_path: str, metadata: dict) -> str:
         json_path = os.path.splitext(pte_path)[0] + ".json"
         with open(json_path, "w") as f:
             json.dump(metadata, f, indent=2)
-        logging.info(f"Wrote sidecar metadata to {json_path}")
+        logging.info(f"Wrote metadata to {json_path}")
         return json_path
 
 

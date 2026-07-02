@@ -9,7 +9,7 @@ tokenize anything.
 
 On export the bundle is written as two standalone files beside the ``.pte``
 (``<stem>.tokenizer.json`` + ``<stem>.tokenizer.config.json``) and is **independent
-of the model sidecar and of the model kind**: the host discovers it by filename
+of the model metadata and of the model kind**: the host discovers it by filename
 convention and the runtime sees only the resulting token ``condition`` inputs
 (matched by name). So either exporter — :class:`LiveModule` or :class:`GenModule` —
 may ship one; see ``EXECUTORCH_PROTOCOL.md`` §3.1 / §7 and the C++ ``TokenizerConfig``

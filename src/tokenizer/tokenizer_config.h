@@ -1,11 +1,11 @@
 #pragma once
 #include <string>
 
-// Standalone tokenizer config sidecar (see EXECUTORCH_PROTOCOL.md §7): describes
+// Standalone tokenizer config file (see EXECUTORCH_PROTOCOL.md §7): describes
 // how a text prompt is encoded for a generative model, INDEPENDENT of the model
 // .pte. The exporter emits it as "<model-stem>.tokenizer.config.json" beside the
 // .pte; it is loaded by neural.tokenizer (Max) and the headless gen_cli host, so
-// the tokenizer settings live in one place rather than inside the model sidecar.
+// the tokenizer settings live in one place rather than inside the model metadata.
 struct TokenizerConfig {
   std::string type = "tokenizers-cpp";
   std::string tokenizer_file;             // HF tokenizer.json, relative to config

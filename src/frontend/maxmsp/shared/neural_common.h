@@ -6,14 +6,15 @@
 #include <string>
 
 // Resolve a model argument to the ABSOLUTE path of its `.pte` program. A usable
-// model is a `<stem>.pte` program + a `<stem>.json` sidecar living together; the
-// sidecar is mandatory (it declares the I/O) while the `.pte` MAY be absent — in
-// which case the backend loads metadata-only and reports the program as missing.
-// We therefore locate the *sidecar* via Max's search path and return its sibling
-// `.pte` path (whether or not that `.pte` exists on disk); the backend probes for
-// it. Returns "" when no sidecar can be found. `arg` may end in `.pte`, `.json`,
-// or carry no extension. Resolving the sidecar (which exists for any usable
-// model) avoids the failed `.pte` lookup that aborted loading when it was absent.
+// model is a `<stem>.pte` program + a `<stem>.json` metadata file living together;
+// the metadata is mandatory (it declares the I/O) while the `.pte` MAY be absent
+// — in which case the backend loads metadata-only and reports the program as
+// missing. We therefore locate the *metadata* via Max's search path and return
+// its sibling `.pte` path (whether or not that `.pte` exists on disk); the
+// backend probes for it. Returns "" when no metadata can be found. `arg` may end
+// in `.pte`, `.json`, or carry no extension. Resolving the metadata (which exists
+// for any usable model) avoids the failed `.pte` lookup that aborted loading when
+// it was absent.
 inline std::string resolve_model_pte(std::string arg) {
   auto ends_with = [](const std::string &s, const std::string &e) {
     return s.size() >= e.size() &&
@@ -24,20 +25,20 @@ inline std::string resolve_model_pte(std::string arg) {
   else if (ends_with(arg, ".json"))
     arg.resize(arg.size() - 5);
 
-  c74::min::path sidecar(arg + ".json"); // search Max's file paths for the sidecar
-  if (!sidecar)                          // operator bool: not found
+  c74::min::path metadata(arg + ".json"); // search Max's file paths for the metadata
+  if (!metadata)                          // operator bool: not found
     return std::string();
-  std::string json_abs = std::string(sidecar); // absolute path to the .json
+  std::string json_abs = std::string(metadata); // absolute path to the .json
   if (ends_with(json_abs, ".json"))
     json_abs.resize(json_abs.size() - 5);
   return json_abs + ".pte"; // sibling .pte (may or may not exist on disk)
 }
 
-// Resolve a model argument to the ABSOLUTE path of its `.json` sidecar (the
+// Resolve a model argument to the ABSOLUTE path of its `.json` metadata (the
 // companion of resolve_model_pte, which returns the sibling `.pte`). Strips a
 // trailing `.pte`/`.json`, locates "<stem>.json" via Max's search path, and
 // returns its absolute path, or "" if not found.
-inline std::string resolve_sidecar_json(std::string arg) {
+inline std::string resolve_metadata_json(std::string arg) {
   auto ends_with = [](const std::string &s, const std::string &e) {
     return s.size() >= e.size() &&
            s.compare(s.size() - e.size(), e.size(), e) == 0;
@@ -47,10 +48,10 @@ inline std::string resolve_sidecar_json(std::string arg) {
   else if (ends_with(arg, ".json"))
     arg.resize(arg.size() - 5);
 
-  c74::min::path sidecar(arg + ".json"); // search Max's file paths for the sidecar
-  if (!sidecar)                          // operator bool: not found
+  c74::min::path metadata(arg + ".json"); // search Max's file paths for the metadata
+  if (!metadata)                          // operator bool: not found
     return std::string();
-  return std::string(sidecar); // absolute path to the .json
+  return std::string(metadata); // absolute path to the .json
 }
 
 // Smallest power of two >= x (>= 1). Used to round a requested host block size

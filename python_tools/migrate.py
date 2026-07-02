@@ -1,5 +1,5 @@
 """Migrate a RAVE TorchScript (``.ts``) model to a ``neural.live~`` ExecuTorch
-``.pte`` + sidecar JSON — no retraining, straight from the exported artifact.
+``.pte`` + metadata JSON — no retraining, straight from the exported artifact.
 
     python -m neural_tilde.migrate percussion.ts --out percussion --delegate coreml
 
@@ -10,7 +10,7 @@ TorchScript program — ``torch.export`` cannot trace the TorchScript interprete
 Dynamo and non-strict paths fail). So this tool takes the only viable bridge,
 ``torch._export.converter.TS2EPConverter``, and wraps it with the fixups a streaming RAVE
 needs, then reuses the rest of the ``neural_tilde`` machinery (delegate partitioners,
-mutable-buffer init pass, and the ``kind:"live"`` sidecar via ``LiveModule``).
+mutable-buffer init pass, and the ``kind:"live"`` metadata via ``LiveModule``).
 
 ### What a RAVE ``.ts`` looks like
 
@@ -46,7 +46,7 @@ It is a cached_conv *streaming* model. Each ``nn~`` method (``encode`` / ``decod
    blocks (→ clicks). Rewrite each into the ``torch.export`` buffer-mutation convention so they
    become persistent ExecuTorch ``MUTABLE_BUFFER`` state.
 
-Then all methods are lowered together to one ``.pte`` and the sidecar JSON is written.
+Then all methods are lowered together to one ``.pte`` and the metadata JSON is written.
 
 ### Per-method resilience
 
@@ -665,8 +665,8 @@ def _lift_cache_mutations(ep) -> list:
     return fqns
 
 
-def _build_sidecar(methods: dict, buffer_size: int, delegate: str):
-    """Emit the ``kind:"live"`` sidecar via ``LiveModule`` — identical to the SAME-S path,
+def _build_metadata(methods: dict, buffer_size: int, delegate: str):
+    """Emit the ``kind:"live"`` metadata via ``LiveModule`` — identical to the SAME-S path,
     so the ``neural.live~`` C++ host parses it unchanged. Returns ``(live_module, metadata)``."""
     live = LiveModule()
     for name, info in methods.items():
@@ -807,15 +807,15 @@ def migrate(ts_path: str, out: str, delegate: str = "coreml",
         f.write(executorch_program.buffer)
     logging.info("Wrote ExecuTorch program to %s", out)
 
-    live, metadata = _build_sidecar({k: methods[k] for k in kept}, buffer_size, delegate)
-    live._write_sidecar_json(out, metadata)
+    live, metadata = _build_metadata({k: methods[k] for k in kept}, buffer_size, delegate)
+    live._write_metadata_json(out, metadata)
     return out
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     ap = argparse.ArgumentParser(
-        description="Migrate a RAVE .ts model to a neural.live~ .pte + sidecar JSON")
+        description="Migrate a RAVE .ts model to a neural.live~ .pte + metadata JSON")
     ap.add_argument("model", help="path to the RAVE TorchScript .ts model")
     ap.add_argument("--out", default=None,
                     help="output path; .pte is appended (default: model name without .ts)")
@@ -838,7 +838,7 @@ def main() -> None:
     path = migrate(args.model, out, delegate=args.delegate,
                    buffer_size=args.buffer_size, rng=args.rng,
                    skip_noise_synth=args.skip_noise_synth)
-    print(f"migrated {args.model} -> {path} (+ sidecar .json), delegate {args.delegate}")
+    print(f"migrated {args.model} -> {path} (+ metadata .json), delegate {args.delegate}")
 
 
 if __name__ == "__main__":

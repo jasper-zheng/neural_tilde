@@ -35,7 +35,7 @@
 #include <string>
 #include <vector>
 
-// Derive "<model-stem>.tokenizer.config.json" beside the .pte (the model sidecar
+// Derive "<model-stem>.tokenizer.config.json" beside the .pte (the model metadata
 // carries no tokenizer block; settings live in this standalone config).
 static std::string config_path_for(const std::string &pte_path) {
   std::string stem = pte_path;
@@ -62,7 +62,7 @@ int main(int argc, char **argv) {
   std::string init_wav; // audio-to-audio init clip (buffer role); optional
   unsigned long long seed = 0;
   // Generic model-attribute overrides by name (e.g. seconds_total, cfg_scale);
-  // GenRunner fills any unspecified attribute from its sidecar default.
+  // GenRunner fills any unspecified attribute from its metadata default.
   std::map<std::string, double> attr_values;
   // Noise-input overrides by name -> raw float32 file (the headless analogue of
   // the jit_matrix noise inlet); loaded after the model so numel can be checked.
@@ -225,7 +225,7 @@ int main(int argc, char **argv) {
         return 1;
       }
       // Target geometry from the buffer input: [.., C, L]; sr from its
-      // sidecar sample_rate, else the output's.
+      // metadata sample_rate, else the output's.
       const auto &sh = ai->shape;
       int dch = sh.size() >= 2 ? sh[sh.size() - 2] : 1;
       int dlen = sh.size() >= 1 ? sh[sh.size() - 1] : 0;

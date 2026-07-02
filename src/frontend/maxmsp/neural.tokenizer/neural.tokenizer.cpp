@@ -124,7 +124,7 @@ void tokenizer_obj::load_tokenizer(std::string arg_path) {
   m_loaded = false;
 
   // Bare-name convenience: an arg without a .json extension is treated as a
-  // model stem -> load "<stem>.tokenizer.json". Manual mode's auto-sidecar
+  // model stem -> load "<stem>.tokenizer.json". Manual mode's auto-config
   // lookup below then picks up "<stem>.tokenizer.config.json" automatically.
   const std::string json_suffix = ".json";
   bool has_json = arg_path.size() >= json_suffix.size() &&
@@ -162,7 +162,7 @@ void tokenizer_obj::load_tokenizer(std::string arg_path) {
     }
 
     // Manual mode: arg is a tokenizer.json directly. Load it, then auto-look for
-    // a sidecar config by name ("<X>.json" -> "<X>.config.json"); if none is
+    // its config by name ("<X>.json" -> "<X>.config.json"); if none is
     // found, post an error and fall back to the default/attribute settings.
     if (!m_tok.load(abs)) {
       cerr << "could not load " << abs << endl;

@@ -31,7 +31,7 @@ using json = nlohmann::json;
 
 // --- Generative-profile helpers (see EXECUTORCH_PROTOCOL.md §7) -------------
 
-// Map a sidecar dtype string to an ExecuTorch ScalarType. Defaults to Float.
+// Map a metadata dtype string to an ExecuTorch ScalarType. Defaults to Float.
 static ScalarType parse_dtype(const std::string &s) {
   if (s == "int64" || s == "long")
     return ScalarType::Long;
@@ -63,7 +63,7 @@ static Role parse_role(const std::string &s) {
     return Role::Signal;
   // "condition" => externally-supplied conditioning, bound by name (e.g. token
   // ids / attention mask from a tokenizer, or a held control vector for live).
-  // dtype comes from the sidecar; no back-compat aliases.
+  // dtype comes from the metadata; no back-compat aliases.
   if (s == "condition")
     return Role::Condition;
   if (s == "noise")
@@ -80,7 +80,7 @@ Backend::Backend()
       m_generative(false), m_seed(0) {}
 
 bool Backend::load_metadata(const std::string &pte_path) {
-  // Sidecar lives next to the .pte with the same basename and a .json suffix.
+  // Metadata lives next to the .pte with the same basename and a .json suffix.
   std::string json_path = pte_path;
   auto dot = json_path.find_last_of('.');
   if (dot != std::string::npos)
@@ -89,7 +89,7 @@ bool Backend::load_metadata(const std::string &pte_path) {
 
   std::ifstream f(json_path);
   if (!f.is_open()) {
-    std::cerr << "neural: missing sidecar metadata " << json_path << std::endl;
+    std::cerr << "neural: missing metadata " << json_path << std::endl;
     return false;
   }
 
@@ -109,14 +109,14 @@ bool Backend::load_metadata(const std::string &pte_path) {
   // Top-level model kind: REQUIRED. "live" (streaming, §2) vs "gen" (generative,
   // §3). No default and no back-compat — a missing or unknown kind is an error.
   if (!j.contains("kind")) {
-    std::cerr << "neural: sidecar " << json_path
+    std::cerr << "neural: metadata " << json_path
               << " missing required \"kind\" (expected \"live\" or \"gen\")"
               << std::endl;
     return false;
   }
   const std::string kind = j.value("kind", std::string());
   if (kind != "live" && kind != "gen") {
-    std::cerr << "neural: sidecar " << json_path << " has unknown kind \"" << kind
+    std::cerr << "neural: metadata " << json_path << " has unknown kind \"" << kind
               << "\" (expected \"live\" or \"gen\")" << std::endl;
     return false;
   }
@@ -215,7 +215,7 @@ bool Backend::load_metadata(const std::string &pte_path) {
 }
 
 int Backend::load(std::string path) {
-  // Parse the sidecar FIRST: without it we know nothing about the model's I/O
+  // Parse the metadata FIRST: without it we know nothing about the model's I/O
   // and cannot even build the host's inlets/attributes. A failure here is the
   // only hard error — the caller has nothing to set up.
   m_loaded = 0;
@@ -227,7 +227,7 @@ int Backend::load(std::string path) {
   m_metadata_loaded = true;
   m_path = path;
 
-  // Is the program (.pte) actually on disk? A sidecar MAY ship without it; we
+  // Is the program (.pte) actually on disk? Metadata MAY ship without it; we
   // keep the parsed metadata (so the host can still create inlets/attributes)
   // but mark the model non-runnable and report it. is_loaded() stays false.
   std::ifstream pte_file(path, std::ios::binary);
@@ -468,7 +468,7 @@ void Backend::perform(std::vector<float *> in_buffer,
   m_inputs.reserve(info.inputs.size());
 
   // Live noise/condition tensors are [n_batches] + declared_shape[1:] — the
-  // sidecar's leading dim is a batch placeholder of 1, replicated to n_batches.
+  // metadata's leading dim is a batch placeholder of 1, replicated to n_batches.
   size_t attr_i = 0, noise_i = 0, cond_i = 0;
   for (const auto &spec : info.inputs) {
     switch (spec.role) {
@@ -477,7 +477,7 @@ void Backend::perform(std::vector<float *> in_buffer,
       break;
     case Role::Attribute: {
       // Scalar [1] control: the caller's value by declared-order index, else the
-      // sidecar default (so attribute-less callers like mc/mcs pass nothing).
+      // metadata default (so attribute-less callers like mc/mcs pass nothing).
       const double v = attr_i < attr_values.size()
                            ? (double)attr_values[attr_i]
                            : spec.def;

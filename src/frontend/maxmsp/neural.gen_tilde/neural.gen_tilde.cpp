@@ -11,16 +11,16 @@
 //   reload <path>      load a model         generate/bang start generation
 //
 // The .pte is the model (diffusion, autoencoder, etc.) 
-// The .json is the models's sidecar, it contains the model's configuration:
+// The .json is the model's metadata, it contains the model's configuration:
 
 // Conditioning inlets: the object creates one inlet per condition-role input
-// (e.g. input_ids, attention_mask) in the order the sidecar declares them. 
+// (e.g. input_ids, attention_mask) in the order the metadata declares them.
 // Each inlet accepts EITHER:
 //  - a `dictionary`: (matched by key name to a condition, so it can land on any inlet)
 //  - or a `list`: (matched by inlet position to a condition, so the first inlet fills the first condition, etc.) 
 // A condition left unsupplied at generate time is zero-filled with a warning.
 //
-// Audio-to-audio: a model whose sidecar declares a `buffer`-role input is
+// Audio-to-audio: a model whose metadata declares a `buffer`-role input is
 // fed an init waveform from a named buffer~ (`init <buffer>`); the host
 // resamples / channel-maps / crops it.
 //
@@ -94,13 +94,12 @@ public:
                       description{"RNG seed for the generation noise."}};
 
   // Other per-model scalar controls (e.g. cfg_scale) are created
-  // dynamically from the sidecar as named Max instance attributes (see
+  // dynamically from the metadata as named Max instance attributes (see
   // add_dynamic_attributes / m_attr_slots). 
 
   // ---- documentation-only arguments --------------------------------------
   argument<symbol> path_arg{this, "model path",
-                            "Path to the .pte model (with its .json beside "
-                            "it)."};
+                            "Path to the .pte model (with its .json metadata beside it)."};
   argument<symbol> method_arg{this, "method",
                               "Method to call (default \"forward\")."};
   argument<symbol> buffer_arg{this, "buffer", "Target buffer~ name."};
@@ -203,7 +202,7 @@ public:
       }};
 
   // Catch-all that sets one of the model's dynamic attributes (named per the
-  // sidecar) from a bare `<name> <value>` message. Those attributes are added
+  // metadata) from a bare `<name> <value>` message. Those attributes are added
   // per-instance (object_addattr) AFTER class registration, so Max's message
   // dispatch doesn't route to them natively — this handler is how a patch
   // message reaches them (the inspector and @box-args reach them directly).
@@ -233,19 +232,19 @@ private:
   GenRunner m_runner;
   std::string m_method{"forward"};
   OutputSpec m_out_spec;
-  // m_loaded: the sidecar parsed, so the I/O (inlets/attributes) is known.
+  // m_loaded: the metadata parsed, so the I/O (inlets/attributes) is known.
   // m_runnable: the .pte program is also present, so generation is possible.
   bool m_loaded{false};
   bool m_runnable{false};
 
-  // One message inlet per condition-role input, in sidecar order, created in the
+  // One message inlet per condition-role input, in metadata order, created in the
   // constructor (ctor) (Max can't add inlets later). m_cond_inlets[i] is
   // the name of the condition reached by inlet i.
   std::vector<std::unique_ptr<inlet<>>> m_inlets;
   std::vector<std::string> m_cond_inlets;
 
   // One per Attribute-role input: a Max instance attribute named `name`, created
-  // from the sidecar at load time (clamp range + default kept for listing/reload).
+  // from the metadata at load time (clamp range + default kept for listing/reload).
   struct AttrSlot {
     std::string name;
     double min, max, def;
@@ -373,7 +372,7 @@ void gen::add_dynamic_attributes() {
     c74::max::object_addattr(self, attr);
     c74::max::object_attr_setfloat(self, c74::max::gensym(in.name.c_str()),
                                    in.def);
-    // Surface the sidecar description as the attribute's inspector label (the
+    // Surface the metadata description as the attribute's inspector label (the
     // per-object mirror of CLASS_ATTR_LABEL).
     if (!in.description.empty())
       c74::max::object_attr_addattr_format(
@@ -387,11 +386,11 @@ void gen::load_model(std::string model_path) {
   m_loaded = false;
   m_runnable = false;
   try {
-    // Resolve the mandatory .json sidecar and derive the sibling .pte path.
+    // Resolve the mandatory .json metadata and derive the sibling .pte path.
     // In the case of .json loaded but .pte missing: the backend loads metadata-only and stays disabled.
     std::string abs = resolve_model_pte(model_path);
     if (abs.empty()) {
-      cerr << "could not find model .json for " << model_path << endl;
+      cerr << "could not find model .json metadata for " << model_path << endl;
       return;
     }
     if (m_runner.load(abs)) {
@@ -404,7 +403,7 @@ void gen::load_model(std::string model_path) {
       return;
     }
     m_out_spec = m_runner.output_spec(m_method);
-    m_loaded = true;                      // sidecar parsed: I/O is known
+    m_loaded = true;                      // metadata parsed: I/O is known
     m_runnable = m_runner.runnable();     // .pte present: generation possible
     detect_matrix_noise();    // find matrix-drivable noise inputs (for attrs)
     build_condition_meta();   // re-resolve condition inlets + reset cache (reload-safe)
@@ -526,7 +525,7 @@ gen::gen(const atoms &args) {
   if (args.size() > 2)
     m_buffer.set(symbol(args[2]));
 
-  // One inlet per condition-role input, in sidecar order. m_cond_inlets was filled by load_model
+  // One inlet per condition-role input, in metadata order. m_cond_inlets was filled by load_model
   // above (build_condition_meta), the same way m_matrix_noise is.
   if (m_cond_inlets.empty()) {
     m_inlets.push_back(std::make_unique<inlet<>>(
@@ -595,7 +594,7 @@ void gen::snapshot_init_audio() {
   }
 
   // Target geometry: channels/length from the input shape [.., C, L], sample
-  // rate from its sidecar sample_rate, else the output's.
+  // rate from its metadata sample_rate, else the output's.
   const auto &sh = ai->shape;
   int dch = sh.size() >= 2 ? sh[sh.size() - 2] : 1;
   int dlen = sh.size() >= 1 ? sh[sh.size() - 1] : 0;
