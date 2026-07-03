@@ -15,7 +15,7 @@
 #define NN_ENGINE_NAME "ExecuTorch"
 #endif
 
-// --- Shared input-role mechanism (see EXECUTORCH_PROTOCOL.md) ---------------
+// --- Shared input-role mechanism (see PROTOCOL.md) ---------------
 // Both model kinds describe a method as an ordered, positional list of typed
 // inputs, each tagged with a role, plus a single audio output. The host sizes &
 // fills every input by role without hardcoding any model.
@@ -25,7 +25,7 @@
 //               per method. The audio tensor is [batch, channels, n_vec/ratio].
 //   Condition — externally supplied, matched by name (token ids / masks for gen;
 //               a held control vector for live). Zero-filled if unsupplied.
-//   Attribute — a scalar [1] control the consumer exposes as a Max attribute,
+//   Attribute — a scalar with shape [1] control exposed as a Max attribute,
 //               clamped to [min,max], defaulting to `def`.
 //   Noise     — host-filled N(0,1), keyed by (seed, name). gen re-derives the
 //               stream each generate(); live seeds one persistent stream per
@@ -57,7 +57,7 @@ struct InputSpec {
 // The single audio output of a method.
 struct OutputSpec {
   std::string name;
-  Role role; // "audio" (gen) | "signal" (live); cosmetic, never switched on
+  Role role; // "buffer" (gen) | "signal" (live); cosmetic, never switched on
   std::vector<int> shape;
   executorch::aten::ScalarType dtype;
   // gen: channel-major [1, channels, length] at sample_rate (no layout field).

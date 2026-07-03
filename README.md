@@ -206,7 +206,7 @@ A method may take **several inputs**, each with a **role**. The role is declared
 | role | kinds | in `neural.gen/live~` |
 |---|---|---|
 | `signal` | live | Signal output from the model, up/downsampled if required. |
-| `audio` | gen | Write `channels × length` into a `buffer~` at `sample_rate`. |
+| `buffer` | gen | Write `channels × length` into a `buffer~` at `sample_rate`. |
 
 
 ## Export your own neural synthesis model

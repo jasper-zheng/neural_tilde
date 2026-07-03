@@ -57,9 +57,9 @@ static size_t et_dtype_size(ScalarType t) {
 }
 
 static Role parse_role(const std::string &s) {
-  // "signal" => (live) the per-block multi-channel audio from the signal inlets;
-  // "audio" is accepted as an alias for the audio output's role.
-  if (s == "signal" || s == "audio")
+  // "signal" => (live) the per-block multi-channel audio from the signal
+  // inlets, and (live) the method's output role.
+  if (s == "signal")
     return Role::Signal;
   // "condition" => externally-supplied conditioning, bound by name (e.g. token
   // ids / attention mask from a tokenizer, or a held control vector for live).
@@ -68,6 +68,8 @@ static Role parse_role(const std::string &s) {
     return Role::Condition;
   if (s == "noise")
     return Role::Noise;
+  // "buffer" => (gen) an init waveform read from a buffer~ (input), and
+  // (gen) the method's output role (written into a buffer~).
   if (s == "buffer")
     return Role::Buffer;
   // "attribute" (and any unrecognized role) => a scalar attribute the consumer

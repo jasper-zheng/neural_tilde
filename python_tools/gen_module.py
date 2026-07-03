@@ -44,8 +44,8 @@ from ._lowering import _executorch_version, _make_partitioner
 #   attribute  — scalar [1] control the host exposes as a Max attribute
 #   noise      — host fills with seeded N(0,1)
 #   buffer     — host-supplied init waveform read from a Max buffer~ (resampled/cropped to spec)
-# Each method's output is always a single audio tensor (role "audio").
-# All audio tensors (the "buffer" input + the "audio" output) are channel-major [1, C, L].
+# Each method's output is always a single audio tensor (role "buffer").
+# All audio tensors (the "buffer"-role input and output) are channel-major [1, C, L].
 # register_condition / register_attribute / register_noise come from _ExporterBase.
 
 
@@ -124,7 +124,7 @@ class GenModule(_ExporterBase):
         logging.info(f'Registering method "{method_name}"')
         self._declare_method(method_name, inputs)
         self._outputs[method_name] = {
-            "name": out_name, "role": "audio", "dtype": out_dtype,
+            "name": out_name, "role": "buffer", "dtype": out_dtype,
             "shape": [1, int(out_channels), int(out_length)],
             "channels": int(out_channels), "length": int(out_length),
             "sample_rate": int(out_sample_rate)}

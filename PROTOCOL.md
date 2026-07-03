@@ -82,7 +82,7 @@ Both kinds share this template:
         ...
       ],
       "output": { /* the single audio output (§2.4) */ 
-        "name": ..., "role": "signal/audio", ...
+        "name": ..., "role": "signal/buffer", ...
       },
       "batch": 1,                 // fixed batch dim, or null if dynamic
       "dynamic_time": false       // true if the time dim is a dynamic Dim
@@ -209,11 +209,11 @@ A method emits exactly one audio output:
 "output": { "name": "audio", "role": "signal", "channels": 1, "ratio": 1,
             "labels": ["(signal) audio out"] }
 ```
- - **gen** → `role: "audio"` with `dtype`/`shape`/`channels`/`length`/`sample_rate`: the host writes `channels × length` channel-major PCM into a `buffer~` at `sample_rate`.
+ - **gen** → `role: "buffer"` with `dtype`/`shape`/`channels`/`length`/`sample_rate`: the host writes `channels × length` channel-major PCM into a `buffer~` at `sample_rate`.
 
  ```jsonc
  "output": {
-        "name": "audio", "role": "audio", "dtype": "float32",
+        "name": "audio", "role": "buffer", "dtype": "float32",
         "shape": [1, 2, 131072],
         "channels": 2, "length": 131072, "sample_rate": 44100
       }
@@ -314,7 +314,7 @@ Use `neural_tilde.GenModule` (`python_tools/gen_module.py`) for offline generati
           "description": "Init audio to vary from." }
       ],
       "output": {
-        "name": "audio", "role": "audio", "dtype": "float32",
+        "name": "audio", "role": "buffer", "dtype": "float32",
         "shape": [1, 2, 131072],
         "channels": 2, "length": 131072, "sample_rate": 44100
       }
