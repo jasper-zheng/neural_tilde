@@ -16,6 +16,6 @@ __pycache__
 
 docs
 
-.claude
+.claude/settings.local.json
 
 new-tokenizer

@@ -7,9 +7,9 @@ This is the simplest possible :class:`GenModule` demo — one method, two inputs
 
 Run::
 
-    python export_gen_example_mini.py [out_stem]
+    python export_gen_example_mini.py [out_name]
 
-Writes ``<out_stem>.pte`` + ``<out_stem>.json`` (default stem: ``tiny_gen``).
+Writes ``<out_name>.pte`` + ``<out_name>.json`` (default stem: ``tiny_gen``).
 
 If the export errors about ``flatc``, prepend
 ``<executorch>/cmake-out/third-party/flatc_ep/bin`` to ``PATH``.

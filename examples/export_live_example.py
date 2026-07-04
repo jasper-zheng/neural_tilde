@@ -1,21 +1,14 @@
-"""Example of exporting a *stateful* conv-net to a Core ML ``.pte`` for ``neural.live~``.
+"""Example of exporting a streamable conv-net to a Core ML ``.pte`` for ``neural.live~``.
 
-Alongside the audio signal it also demonstrates two extra inputs: a scalar ``attribute``
-(``gain``, exposed as a Max attribute the host feeds every block) and a held ``condition``
-(``bias``, a control value the patch supplies) — each registered once by name and listed,
-in order, via ``register_method(inputs=[...])`` so the ``forward`` receives them after ``x``.
-
-Click-Free Streaming
---------------
-This model uses ``cached_conv`` (``cc.Conv1d``) — *one* way to build a stateful streaming net: each
-layer keeps the previous block's tail so consecutive blocks join without clicks. Any mechanism that
-carries internal state across ``execute()`` calls works; the protocol does not mandate ``cached_conv``.
-When exporting with ``delegate="coreml"``, the Core ML partitioner takes the model's mutable buffers
-over as native Core ML *state* (``take_over_mutable_buffer=True``), so the state persists across
-``execute()`` calls.
+It demonstrates two extra inputs: an ``attribute`` (``gain``) and a ``condition``
+(``bias``), each registered via ``register_method(inputs=[...])``
 
 If the export errors about ``flatc``,
 prepend ``<executorch>/cmake-out/third-party/flatc_ep/bin`` to ``PATH``.
+
+Run:
+
+    python export_live_example.py [out_name]
 
 """
 
