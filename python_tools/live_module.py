@@ -268,7 +268,8 @@ class LiveModule(_ExporterBase):
                       buffer_size: int = 4096,
                       batch: int = 1,
                       strict: bool = False,
-                      warmup: bool = True) -> str:
+                      warmup: bool = True,
+                      coreml_compute_units: Optional[str] = None) -> str:
         """Export the registered methods to an ExecuTorch ``.pte`` + metadata JSON.
 
         Each registered method becomes one ExecuTorch method taking a
@@ -281,7 +282,11 @@ class LiveModule(_ExporterBase):
 
         Args:
             path: output path; ``.pte`` is appended if missing.
-            delegate: "xnnpack" (default), "coreml", "mlx", or "portable".
+            delegate: "xnnpack" (default), "coreml", "mlx", "mps", or "portable".
+                All persist cached_conv streaming state across execute() (mlx/mps
+                verified bit-identical to xnnpack). mlx and mps are experimental with
+                narrower op coverage, so some models abort at runtime — validate each
+                exported model on the target.
             buffer_size: audio-rate block size to export at; must be a multiple
                 of every in_ratio/out_ratio.
             batch: fixed batch dimension baked into the program.
@@ -292,6 +297,11 @@ class LiveModule(_ExporterBase):
                 streaming model is exported stateless and clicks at every block
                 boundary. Default on; set ``False`` only if the model has no
                 streaming state or has already primed/zeroed its caches manually.
+            coreml_compute_units: CoreML only — name the ``coremltools.ComputeUnit`` to
+                compile for (``"ALL"`` / ``"CPU_ONLY"`` / ``"CPU_AND_GPU"`` / ``"CPU_AND_NE"``).
+                Defaults to ``"ALL"`` (CoreML picks CPU/GPU/ANE per op); the ``NN_COREML_CU``
+                env var overrides that default when this is left ``None``. Ignored by the
+                other delegates.
         """
         if not path.endswith(".pte"):
             path = path + ".pte"
@@ -308,7 +318,8 @@ class LiveModule(_ExporterBase):
                 "export_to_pte requires the 'executorch' package. Install it "
                 "(e.g. `pip install executorch`) or build it from source.") from e
 
-        partitioner = _make_partitioner(delegate)
+        partitioner = _make_partitioner(
+            delegate, coreml_compute_units=coreml_compute_units)
 
         method_graphs = {}
         primed_buffers = []  # FQNs of lazily-allocated streaming buffers (caches)

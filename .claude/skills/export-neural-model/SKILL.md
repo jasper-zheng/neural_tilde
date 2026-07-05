@@ -97,7 +97,7 @@ gm.register_method("prompt2audio", inputs=["input_ids", "init_noise"],
 export_to_pte(path, delegate="xnnpack", buffer_size=4096, batch=1, strict=False, warmup=True)
 ```
 - `path` — output stem (`.pte` appended if missing); the `.json` is written beside it.
-- `delegate` — `"xnnpack"` | `"coreml"` | `"mlx"` | `"portable"`.
+- `delegate` — `"xnnpack"` | `"coreml"` | `"mlx"` | `"mps"` | `"portable"`.
 - `buffer_size` — audio-rate block size baked into the program; **must be a multiple of every `in_ratio`/`out_ratio`**.
 - `batch` — fixed batch dim.
 - `strict` — `torch.export` tracing mode.
@@ -105,16 +105,19 @@ export_to_pte(path, delegate="xnnpack", buffer_size=4096, batch=1, strict=False,
 
 **GenModule** (`python_tools/gen_module.py`):
 ```python
-export_to_pte(path, delegate="mlx", graph_transforms=(), decompose_conv=False)
+export_to_pte(path, delegate="mlx", graph_transforms=(), decompose_conv=False,
+              coreml_compute_units=None)
 ```
 - `path` — output stem (`.pte` appended if missing); `.json` written beside it.
-- `delegate` — `"mlx"` | `"coreml"` | `"xnnpack"` | `"portable"`.
+- `delegate` — `"mlx"` | `"coreml"` | `"xnnpack"` | `"mps"` | `"portable"`.
 - `graph_transforms` — callables applied to each method's ExportedProgram before lowering.
 - `decompose_conv` — decompose `aten.convolution` → `conv1d`; **set `True` for conv models on the MLX backend**.
+- `coreml_compute_units` — CoreML only: `"ALL"` (default) | `"CPU_ONLY"` | `"CPU_AND_GPU"` | `"CPU_AND_NE"`. Leave `None` to use the `NN_COREML_CU` env var if set, else `"ALL"`. (`LiveModule.export_to_pte` takes the same kwarg.)
 
 **Delegate chooser**
-- **coreml** — CPU + Apple Neural Engine; production target on macOS 15+ (native Core ML state via `take_over_mutable_buffer`). Override the compute unit with the `NN_COREML_CU` env var if needed.
+- **coreml** — production target on macOS 15+ (native Core ML state via `take_over_mutable_buffer`). Defaults to compute unit `ALL` (Core ML picks CPU/GPU/ANE per op); pick a preset with the `coreml_compute_units` kwarg (or the `NN_COREML_CU` env var). Note Core ML's GPU path miscomputes RAVE (CPU/ANE are bit-correct), so `migrate.py` pins RAVE to `CPU_AND_NE` — validate any model exported with GPU on target.
 - **mlx** — Apple-Silicon GPU; good for `gen` / one-shot buffer processing (experimental; convs need `decompose_conv=True`).
+- **mps** — Apple-Silicon GPU via MPSGraph; **persists streaming state** (verified bit-identical to xnnpack, so it streams correctly), fp32 by default (`NN_MPS_FP16=1` to opt into fp16). Experimental and **deprecated upstream in ExecuTorch 1.4**; op coverage is incomplete, so some ops abort at runtime — notably **transposed convolution** (`nn.ConvTranspose1d`/`2d`), which Core ML handles: replace it with a forward-conv upsampler (sub-pixel/pixel-shuffle or nearest-neighbor + conv). Validate each model with a smoke test. Needs an MPS-enabled runtime (`-DEXECUTORCH_BUILD_MPS=ON`).
 - **xnnpack** — optimized CPU kernels; portable default for `live`.
 - **portable** — plain C++ kernels; maximum compatibility, no delegation.
 

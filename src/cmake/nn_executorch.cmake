@@ -36,8 +36,10 @@ function(nn_link_executorch target)
     "-framework Foundation"
     "-framework Accelerate"
   )
-  # MLX (Apple-Silicon GPU) delegate — fast, but does NOT persist cached_conv
-  # streaming state across execute() (streaming models click; see plan/memory).
+  # MLX (Apple-Silicon GPU) delegate — fast, and DOES persist cached_conv streaming
+  # state across execute() (verified bit-identical to XNNPACK on conv models incl.
+  # multi-rate encoders; the old "MLX clicks" note was an untested assumption).
+  # Still experimental: narrower op coverage (e.g. complex/FFT unsupported).
   if(TARGET mlxdelegate)
     target_link_libraries(${target} PRIVATE
       mlxdelegate mlx "-framework Metal" "-framework QuartzCore")
@@ -57,5 +59,19 @@ function(nn_link_executorch target)
     find_library(SQLITE_LIBRARY sqlite3)
     target_link_libraries(${target} PRIVATE
       coremldelegate sqlite3 "-framework CoreML")
+  endif()
+  # MPS (Apple GPU via MPSGraph) delegate. Persists cached_conv streaming state
+  # across execute() (verified bit-identical to XNNPACK), so it streams correctly —
+  # but its op/shape coverage is incomplete and some models abort at runtime in
+  # MPSGraph verification, so validate each model. Deprecated in ExecuTorch >=1.4
+  # (use CoreML/Metal there). The imported target already carries the Metal*
+  # frameworks + -force_load via its interface; the frameworks are re-listed here
+  # to match the CoreML/MLX blocks.
+  if(TARGET mpsdelegate)
+    target_link_libraries(${target} PRIVATE
+      mpsdelegate
+      "-framework Metal"
+      "-framework MetalPerformanceShaders"
+      "-framework MetalPerformanceShadersGraph")
   endif()
 endfunction()

@@ -21,8 +21,9 @@ This package has two families of Max objects:
 **Supported models:**  
  - [Live] [RAVE-CoreML](https://github.com/jasper-zheng/RAVE-CoreML) A streamable codec for timbre transfer / latent-space audio manipulation
  - [Live] [SAME-S](https://github.com/jasper-zheng/streamable-same-s): A streamable codec for audio encoding/decoding
+ - [Live] [Open-Unmix-Live](#) [Available soon]
  - [Gen] [Stable Audio 3](https://github.com/jasper-zheng/stable-audio-3-tilde): Latent diffusion transformer for text-to-audio, audio-to-audio, inpainting
- - [Gen/Live] [CodiCodec-Flow](https://github.com/jasper-zheng/codicodec-flow) [Available soon]
+ - [Gen] [CodiCodec-Flow](https://github.com/jasper-zheng/codicodec-flow) [Available soon]
 
 **Note:** Currently only available for MaxMSP on Apple Silicon, macOS. For Windows/CUDA, it's on the todo list. 
 
@@ -58,8 +59,9 @@ This package has two families of Max objects:
 
 ### Supported back-ends:
 
-- **[Core ML](https://developer.apple.com/documentation/coreml)** - Leverage Apple Neural Engine (ANE) for hardware acceleration. Needs **macOS 15+** at runtime.
-- **[MLX](https://github.com/ml-explore/mlx)** - Apple-Silicon GPU; Good for one-shot / buffer processing.
+- **[MLX](https://github.com/ml-explore/mlx)** - Uses Apple-Silicon GPU.
+- **[Core ML](https://developer.apple.com/documentation/coreml)** - Uses all compute units by default (CPU / GPU / ANE); selectable via the `coreml_compute_units` export kwarg. Needs **macOS 15+** at runtime.
+- **[MPS](https://docs.pytorch.org/executorch/stable/backends/mps/mps-overview.html)** - Apple-Silicon GPU via MPSGraph. (Deprecated by ExecuTorch, use Core ML or MLX instead)
 - **[XNNPACK](https://github.com/google/XNNPACK)** - CPU inference with optimized kernels.
 - **portable** - plain, unoptimized C++ kernels, maximum compatibility
 - ~~CUDA~~ - Windows CUDA in progress
@@ -93,24 +95,6 @@ Compiled externals / Max help patches will be available soon. For now, please bu
 | --- | --- |
 | ![neural.live~ minimal patch](assets/live-minimal.png) | ![neural.gen~ minimal patch](assets/gen-minimal.png) |
 
-<!-- Alt text for the above images for neural.gen~:
-```
-[prompt lofi house loop]              <- message to the tokenizer
-       |
-[neural.tokenizer my_tokenizer]
-       |        |     <- outlet 0 = {token_ids}, outlet 1 = {attention_mask}
-       |        |
-[neural.gen~ my_diffusion @seed 0]
-       |               (inlet 0 = token_ids, inlet 1 = attention_mask)
-   (done bang)        ... writes into [buffer~ gen 176400 2]
-```
-
-1. Create `[buffer~ gen 176400 2]` (stereo 4s at 44.1 kHz). Send `neural.gen~` the message `set gen` to target it.
-2. Send the prompt to **`neural.tokenizer`** (`prompt lofi house loop`); wire its two outlets into the matching `neural.gen~` condition inlets.
-3. Send `generate` message (or `bang`) to `neural.gen~`. The `done` outlet produce a bang once generation finishes, and you can play it with `groove~ gen` / `play~`.
-
-You can pass `neural.tokenizer` the `*.tokenizer.json`. 
--->
 
 ### `neural.live~`:
 
@@ -371,7 +355,7 @@ See the table below for a comparison of the two packages:
 | Real-time streaming | ✅ `neural.live~` | ✅ |
 | Input types | ✅ `signal`, `attribute`, `condition`, `noise`, `buffer` | ❌ only `signal` + `attribute` |
 | Attributes | ✅ Added as native Max attributes | ❌ use `set` / `get` messages |
-| Backends | ✅ CoreML, XNNPack, MLX, Portable | ❌ only TorchScript |
+| Backends | ✅ CoreML, XNNPack, MLX, MPS, Portable | ❌ only TorchScript |
 | Dynamic device | ❌ Fixed when exporting | ✅ Can be switched in runtime |
 | Dynamic buffer size | ❌ Fixed when exporting | ✅ Specified as an argument |
 | Library | ExecuTorch | TorchScript (deprecated in PyTorch 2.10) |

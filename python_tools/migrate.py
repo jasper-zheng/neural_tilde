@@ -680,8 +680,12 @@ def _build_metadata(methods: dict, buffer_size: int, delegate: str):
 
 def migrate(ts_path: str, out: str, delegate: str = "coreml",
             buffer_size: Optional[int] = None, rng: str = "keep",
-            skip_noise_synth: bool = False) -> str:
-    """Convert a RAVE ``.ts`` to ``<out>.pte`` + ``<out>.json``. Returns the ``.pte`` path."""
+            skip_noise_synth: bool = False,
+            compute_units: str = "CPU_AND_NE") -> str:
+    """Convert a RAVE ``.ts`` to ``<out>.pte`` + ``<out>.json``. Returns the ``.pte`` path.
+
+    ``compute_units`` (CoreML only) pins the ``coremltools.ComputeUnit``; defaults to
+    ``"CPU_AND_NE"`` because CoreML's GPU path miscomputes RAVE (CPU/ANE are bit-correct)."""
     from executorch.exir import EdgeCompileConfig, to_edge_transform_and_lower
 
     scripted = torch.jit.load(ts_path, map_location="cpu").eval()
@@ -762,6 +766,8 @@ def migrate(ts_path: str, out: str, delegate: str = "coreml",
         # Migrated RAVE methods can partition differently under CoreML (decode's FFT noise
         # synth vs encode), so disable POSITIONAL multimethod weight sharing (which requires
         # equal partition counts). view_as_complex needs no_grad (autograd-on-complex error).
+        # Pin the CoreML compute unit (default CPU_AND_NE): CoreML's GPU path miscomputes RAVE
+        # while CPU/ANE are bit-correct — the exporter default is ALL, so RAVE must ask for it.
         # Lower a deep copy: to_edge_transform_and_lower consumes the EP, but we may need to
         # re-lower a method (trial then final), so keep the originals in method_graphs pristine.
         buffers = [fqn for name in graphs for fqn in primed[name]]
@@ -769,7 +775,9 @@ def migrate(ts_path: str, out: str, delegate: str = "coreml",
             return to_edge_transform_and_lower(
                 copy.deepcopy(graphs),
                 transform_passes=_make_init_mutable_passes(buffers),
-                partitioner=_make_partitioner(delegate, coreml_disable_weight_sharing=True),
+                partitioner=_make_partitioner(
+                    delegate, coreml_disable_weight_sharing=True,
+                    coreml_compute_units=compute_units),
                 compile_config=cfg).to_executorch()
 
     # Try all methods together; if a method uses ops the delegate can't handle (e.g. RAVE's
@@ -830,6 +838,10 @@ def main() -> None:
     ap.add_argument("--skip-noise-synth", action="store_true",
                     help="excise RAVE's FFT noise synth so decode/forward lower to CoreML/CPU "
                          "(lossy: drops the synthesized noise texture)")
+    ap.add_argument("--compute-units", default="CPU_AND_NE",
+                    choices=["ALL", "CPU_ONLY", "CPU_AND_GPU", "CPU_AND_NE"],
+                    help="CoreML compute unit (default CPU_AND_NE; CoreML's GPU miscomputes "
+                         "RAVE, so avoid ALL/CPU_AND_GPU unless you validate the output)")
     args = ap.parse_args()
 
     out = args.out
@@ -837,7 +849,8 @@ def main() -> None:
         out = args.model[:-3] if args.model.endswith(".ts") else args.model
     path = migrate(args.model, out, delegate=args.delegate,
                    buffer_size=args.buffer_size, rng=args.rng,
-                   skip_noise_synth=args.skip_noise_synth)
+                   skip_noise_synth=args.skip_noise_synth,
+                   compute_units=args.compute_units)
     print(f"migrated {args.model} -> {path} (+ metadata .json), delegate {args.delegate}")
 
 

@@ -188,7 +188,8 @@ class GenModule(_ExporterBase):
                       delegate: str = "mlx",
                       graph_transforms: Sequence[Callable[[ExportedProgram],
                                                           ExportedProgram]] = (),
-                      decompose_conv: bool = False) -> str:
+                      decompose_conv: bool = False,
+                      coreml_compute_units: Optional[str] = None) -> str:
         """Export every registered method to an ExecuTorch ``.pte`` + metadata (+ tokenizer) JSON.
 
         Each registered method becomes one ExecuTorch method traced with one zero example
@@ -197,12 +198,17 @@ class GenModule(_ExporterBase):
 
         Args:
             path: output path; ``.pte`` is appended if missing.
-            delegate: "mlx" (default), "coreml", "xnnpack", or "portable".
+            delegate: "mlx" (default), "coreml", "xnnpack", "mps", or "portable".
             graph_transforms: callables applied to each method's ExportedProgram before
                 lowering (e.g. model-specific graph surgery). Applied in order.
             decompose_conv: also apply the built-in ``decompose_convolution_nodes``
                 (``aten.convolution`` → ``aten.conv1d``) — needed for conv models on the
                 MLX backend.
+            coreml_compute_units: CoreML only — name the ``coremltools.ComputeUnit`` to
+                compile for (``"ALL"`` / ``"CPU_ONLY"`` / ``"CPU_AND_GPU"`` / ``"CPU_AND_NE"``).
+                Defaults to ``"ALL"`` (CoreML picks CPU/GPU/ANE per op); the ``NN_COREML_CU``
+                env var overrides that default when this is left ``None``. Ignored by the
+                other delegates.
 
         Returns:
             the path to the written ``.pte``.
@@ -243,7 +249,8 @@ class GenModule(_ExporterBase):
 
         lowered = to_edge_transform_and_lower(
             method_graphs,
-            partitioner=_make_partitioner(delegate),
+            partitioner=_make_partitioner(
+                delegate, coreml_compute_units=coreml_compute_units),
             compile_config=EdgeCompileConfig(_check_ir_validity=False),
         )
         executorch_program = lowered.to_executorch()
