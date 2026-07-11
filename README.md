@@ -339,7 +339,7 @@ The full input-role / metadata template is in [PROTOCOL.md](PROTOCOL.md).
 ## Migrate from `nn~`
 
 The `neural.*~` package originated from [`nn~`](https://github.com/acids-ircam/nn_tilde) (Antoine Caillon & Axel Chemla--Romeu-Santos, ACIDS-IRCAM). The underlying framework moved from **TorchScript** (deprecated in PyTorch 2.10) to **[ExecuTorch](https://docs.pytorch.org/executorch/stable/index.html)**, with:
- - Hardware acceleration on Apple Silicon (via CoreML, MLX, or XNNPack), 
+ - Hardware acceleration on Apple Silicon, 
  - A new offline generation object (`neural.gen~`), 
  - Better support for modern generative models' input types (text, noise, condition),
  - A new JSON model metadata.
@@ -352,7 +352,7 @@ See the table below for a comparison of the two packages:
 | Real-time streaming | ✅ `neural.live~` | ✅ |
 | Input types | ✅ `signal`, `attribute`, `condition`, `noise`, `buffer` | ❌ only `signal` + `attribute` |
 | Attributes | ✅ Added as native Max attributes | ❌ use `set` / `get` messages |
-| Backends | ✅ CoreML, XNNPack, MLX, MPS, Metal *(experimental)*, Portable | ❌ only TorchScript |
+| Backends | ✅ MLX, CoreML, XNNPack, MPS, Portable | ❌ only TorchScript |
 | Dynamic device | ❌ Fixed when exporting | ✅ Can be switched in runtime |
 | Dynamic buffer size | ❌ Fixed when exporting | ✅ Specified as an argument |
 | Library | ExecuTorch | TorchScript (deprecated in PyTorch 2.10) |
