@@ -37,7 +37,8 @@ import torch
 from torch.export import ExportedProgram
 
 from ._exporter_base import _ExporterBase, _MethodWrapper
-from ._lowering import _executorch_version, _make_partitioner
+from ._lowering import (_executorch_version, _make_partitioner,
+                        _metal_graph_transforms, _metal_setup_link_env)
 
 # Roles understood by the gen host (see EXECUTORCH_PROTOCOL.md §3 and GenRunner):
 #   condition  — externally supplied (tokens/masks), matched by name
@@ -198,7 +199,10 @@ class GenModule(_ExporterBase):
 
         Args:
             path: output path; ``.pte`` is appended if missing.
-            delegate: "mlx" (default), "coreml", "xnnpack", "mps", or "portable".
+            delegate: "mlx" (default), "coreml", "xnnpack", "mps", "metal", or "portable".
+                "metal" (EXPERIMENTAL) whole-graph AOTInductor compile to a Metal .so embedded
+                in the .pte — moves the heavy compile to export time for a fast load; needs the
+                ExecuTorch Metal runtime (EXECUTORCH_BUILD_METAL) + macOS.
             graph_transforms: callables applied to each method's ExportedProgram before
                 lowering (e.g. model-specific graph surgery). Applied in order.
             decompose_conv: also apply the built-in ``decompose_convolution_nodes``
@@ -236,6 +240,11 @@ class GenModule(_ExporterBase):
         transforms = list(graph_transforms)
         if decompose_conv:
             transforms.append(decompose_convolution_nodes)
+        if delegate == "metal":
+            # Metal/AOTI needs const-folding (the constant-pow inductor bug) + split/chunk
+            # decomposition (split_copy) applied per method, and libomp on the link path.
+            _metal_setup_link_env()
+            transforms.extend(_metal_graph_transforms())
 
         method_graphs = {}
         for name in self._methods:
@@ -247,10 +256,17 @@ class GenModule(_ExporterBase):
                 exported = transform(exported)
             method_graphs[name] = exported
 
+        # Metal compiles one .so per method keyed on its name, so it needs a per-method
+        # partitioner dict; the other delegates share one partitioner across all methods.
+        if delegate == "metal":
+            partitioner = {name: _make_partitioner("metal", method_name=name)
+                           for name in method_graphs}
+        else:
+            partitioner = _make_partitioner(
+                delegate, coreml_compute_units=coreml_compute_units)
         lowered = to_edge_transform_and_lower(
             method_graphs,
-            partitioner=_make_partitioner(
-                delegate, coreml_compute_units=coreml_compute_units),
+            partitioner=partitioner,
             compile_config=EdgeCompileConfig(_check_ir_validity=False),
         )
         executorch_program = lowered.to_executorch()

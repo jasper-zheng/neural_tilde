@@ -30,9 +30,21 @@ cmake -S . -B cmake-out -DCMAKE_BUILD_TYPE=Release \
   -DEXECUTORCH_BUILD_EXTENSION_DATA_LOADER=ON \
   -DEXECUTORCH_BUILD_COREML=ON \
   -DEXECUTORCH_BUILD_XNNPACK=ON \
-  -DEXECUTORCH_BUILD_MPS=ON        # optional: Apple-GPU MPSGraph delegate (see below)
+  -DEXECUTORCH_BUILD_MPS=ON       # optional: Apple-GPU MPSGraph delegate (see below)
 cmake --build cmake-out --target install -j8
 ```
+<!-- 
+> **Metal (experimental):** `-DEXECUTORCH_BUILD_METAL=ON` builds the AOTInductor `metal_backend`
+> + `aoti_common` runtime and requires PyTorch at configure time (it links torch's `libomp`).
+> `neural_tilde`'s `nn_executorch.cmake` auto-links `metal_backend` when the runtime exports the
+> target, so no extra flag is needed on the external build. **Runtime libomp:** the Metal runtime
+> and the compiled `.so` embedded in each `.pte` depend on `libomp` at load; the external build
+> ships a copy of it inside every ExecuTorch `.mxo` and repoints the dependency to `@rpath` (see
+> `cmake/nn_metal_libomp.sh`). Pass `-DNN_LIBOMP_PATH=/path/to/libomp.dylib` — for an exact ABI
+> match, use the **same** `libomp` the ET runtime (torch) was built with (e.g. `<torch>/lib/
+> libomp.dylib`); it falls back to a Homebrew `libomp` if unset. **Exporting** a Metal `.pte` also
+> needs `libomp` on `LIBRARY_PATH` (the exporter auto-adds the active torch's lib dir; set it
+> manually otherwise) and tolerates a missing torchao-MPS build. See "Choosing a delegate" below. -->
 
 
 ### 2. Build the `neural.live~` externals
@@ -61,49 +73,3 @@ rsync -a --delete src/externals/ externals/
 codesign --force --deep -s - externals/*.mxo
 ```
 
-To sanity-check a build without Max, `et_smoke_test` (also built into `build_et/`) loads a `.pte`
-through the backend directly:
-
-```bash
-build_et/et_smoke_test path/to/model.pte forward
-```
-
-### Choosing a delegate for live/streaming models
-
-The ExecuTorch delegate is baked into the `.pte` **at export time** — the externals just load
-and run whatever the program was lowered to. The build links all of them (`nn_executorch.cmake`),
-so the choice is a *model-export* decision, and it matters for streaming:
-
-- **XNNPACK** (CPU) — correctly persists `cached_conv` streaming state across `execute()`
-  everywhere. Safe default for `kind: "live"` models.
-- **CoreML** (Apple CPU/GPU/ANE) — also streams correctly: the mutable state buffers are taken
-  over as native Core ML state (`take_over_mutable_buffer=True`). Needs **macOS 15+** at runtime.
-  Compiles for compute unit `ALL` by default (Core ML picks CPU/GPU/ANE per op); pick a preset
-  via the `coreml_compute_units` export kwarg (or `NN_COREML_CU`). Core ML's GPU path miscomputes
-  RAVE (CPU/ANE are bit-correct), so `neural_tilde.migrate` pins RAVE to `CPU_AND_NE` — validate
-  any model exported with the GPU on target.
-- **MLX** (Apple-Silicon GPU) — fast, and **does persist `cached_conv` streaming state** across
-  `execute()`: verified bit-identical to XNNPACK on conv models, including multi-rate/strided
-  encoders (max abs diff ~1e-7, exactly continuous at block boundaries). So it streams correctly.
-  It's still experimental (op coverage is incomplete — e.g. complex/FFT ops are unsupported, and
-  some conv `gen` models need `decompose_conv=True`), so validate unusual models. *(Earlier docs
-  claimed MLX clicks on streaming; that was an untested assumption — MLX, like XNNPACK, has no
-  explicit `take_over_mutable_buffer`, but the mutable caches stay in ExecuTorch-managed memory and persist. )*
-- **MPS** (Apple-Silicon GPU via MPSGraph) — **does** persist `cached_conv` streaming state
-  (verified bit-identical to XNNPACK), so it streams correctly. The catch is **op/shape coverage**:
-  it's experimental (and deprecated upstream in ExecuTorch 1.4), and some ops abort at runtime in
-  MPSGraph verification — notably **transposed convolution** (`nn.ConvTranspose1d`/`2d` is silently
-  compiled as a forward conv and `SIGABRT`s), which Core ML handles fine. Replace transposed convs with
-  a forward-conv upsampler (the bundled `examples/export_gen_example.py` uses sub-pixel/pixel-shuffle
-  upsampling for exactly this reason, so it runs on all delegates). Enable MPS with
-  `-DEXECUTORCH_BUILD_MPS=ON` (step 1) and **validate each exported model** with
-  `et_smoke_test`/`gen_smoke_test` before relying on it.
-
-So: **XNNPACK** and **CoreML** are the safe streaming defaults; **MLX** and **MPS** also persist
-streaming state correctly (both verified against XNNPACK), but are experimental — validate a new
-model with a smoke test, since their op coverage is narrower (MLX: complex/FFT; MPS: transposed
-conv). See `PROTOCOL.md` §2.4 (internal state) for the contract.
-
-To reproduce the MPS validation: `python examples/export_gen_example.py m mps` /
-`python examples/export_live_example.py m mps` (the 2nd arg picks the delegate), then run the
-matching smoke test on the `.pte`.

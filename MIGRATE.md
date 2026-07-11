@@ -15,7 +15,7 @@ See the table below for a comparison of the two packages:
 | Real-time streaming | ✅ `neural.live~` | ✅ |
 | Input types | ✅ `signal`, `attribute`, `condition`, `noise`, `buffer` | ❌ only `signal` + `attribute` |
 | Attributes | ✅ Added as native Max attributes | ❌ use `set` / `get` messages |
-| Backends | ✅ CoreML, XNNPack, MLX, Portable | ❌ only TorchScript |
+| Backends | ✅ CoreML, XNNPack, MLX, MPS, Metal *(experimental)*, Portable | ❌ only TorchScript |
 | Dynamic device | ❌ Fixed when exporting | ✅ Can be switched in runtime |
 | Dynamic buffer size | ❌ Fixed when exporting | ✅ Specified as an argument |
 | Library | ExecuTorch | TorchScript (deprecated in PyTorch 2.10) |

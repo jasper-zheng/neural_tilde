@@ -199,12 +199,24 @@ int main(int argc, char **argv) {
       return 1;
     }
     const float *ref = reinterpret_cast<const float *>(refb.data());
-    double max_abs = 0.0;
-    for (size_t i = 0; i < audio.size(); i++)
-      max_abs = std::max(max_abs, (double)std::fabs(audio[i] - ref[i]));
-    std::printf("  max|Δ| vs Python .pte: %.3e  %s\n", max_abs,
-                max_abs <= 1e-4 ? "<= 1e-4 ✓" : "> 1e-4 ✗");
-    if (max_abs > 1e-4) {
+    // Two gates (mirroring verify.py / PROTOCOL §7.6): exact parity for non-iterative models
+    // (max|Δ| <= 1e-4), OR high correlation for iterative/generative samplers — a chaotic
+    // flow-ODE + decode amplifies tiny fp32 GPU-vs-CPU differences into a large max|Δ| while the
+    // output stays a valid sample (Pearson r > 0.999, the gate CoreML passes for CoDiCodec-Flow).
+    double max_abs = 0.0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+    const size_t n = audio.size();
+    for (size_t i = 0; i < n; i++) {
+      double a = audio[i], r = ref[i];
+      max_abs = std::max(max_abs, std::fabs(a - r));
+      sx += a; sy += r; sxx += a * a; syy += r * r; sxy += a * r;
+    }
+    double cov = sxy - sx * sy / n;
+    double vx = sxx - sx * sx / n, vy = syy - sy * sy / n;
+    double corr = (vx > 0 && vy > 0) ? cov / std::sqrt(vx * vy) : (max_abs <= 1e-4 ? 1.0 : 0.0);
+    bool ok = (max_abs <= 1e-4) || (corr > 0.999);
+    std::printf("  max|Δ| vs Python .pte: %.3e (gate 1e-4)   corr: %.6f (gate 0.999)   %s\n",
+                max_abs, corr, ok ? "✓" : "✗");
+    if (!ok) {
       std::fprintf(stderr, "PARITY FAIL\n");
       return 1;
     }

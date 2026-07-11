@@ -36,7 +36,8 @@ import torch
 
 from ._exporter_base import _ExporterBase, _MethodWrapper
 from ._lowering import (_executorch_version, _make_init_mutable_passes,
-                        _make_partitioner)
+                        _make_partitioner, _metal_graph_transforms,
+                        _metal_setup_link_env)
 
 
 class LiveModule(_ExporterBase):
@@ -282,11 +283,14 @@ class LiveModule(_ExporterBase):
 
         Args:
             path: output path; ``.pte`` is appended if missing.
-            delegate: "xnnpack" (default), "coreml", "mlx", "mps", or "portable".
+            delegate: "xnnpack" (default), "coreml", "mlx", "mps", "metal", or "portable".
                 All persist cached_conv streaming state across execute() (mlx/mps
                 verified bit-identical to xnnpack). mlx and mps are experimental with
                 narrower op coverage, so some models abort at runtime — validate each
-                exported model on the target.
+                exported model on the target. "metal" (EXPERIMENTAL) whole-graph
+                AOTInductor compile to an embedded Metal .so (needs the ExecuTorch Metal
+                runtime + macOS); cached_conv state persistence across a monolithic AOTI
+                function is UNVERIFIED for streaming — smoke-test before relying on it.
             buffer_size: audio-rate block size to export at; must be a multiple
                 of every in_ratio/out_ratio.
             batch: fixed batch dimension baked into the program.
@@ -318,8 +322,16 @@ class LiveModule(_ExporterBase):
                 "export_to_pte requires the 'executorch' package. Install it "
                 "(e.g. `pip install executorch`) or build it from source.") from e
 
-        partitioner = _make_partitioner(
-            delegate, coreml_compute_units=coreml_compute_units)
+        # Metal compiles one .so per method keyed on its name (per-method partitioner dict)
+        # and needs libomp on the link path; the other delegates share one partitioner.
+        if delegate == "metal":
+            _metal_setup_link_env()
+            partitioner = {name: _make_partitioner("metal", method_name=name)
+                           for name in self._methods}
+        else:
+            partitioner = _make_partitioner(
+                delegate, coreml_compute_units=coreml_compute_units)
+        _metal_transforms = _metal_graph_transforms() if delegate == "metal" else []
 
         method_graphs = {}
         primed_buffers = []  # FQNs of lazily-allocated streaming buffers (caches)
@@ -337,8 +349,12 @@ class LiveModule(_ExporterBase):
             if warmup:
                 primed_buffers += self._prime_streaming_buffers(name, example)
             with torch.no_grad():
-                method_graphs[name] = torch.export.export(wrapper, example,
-                                                          strict=strict)
+                exported = torch.export.export(wrapper, example, strict=strict)
+            # Metal/AOTI only: const-fold (constant-pow bug) + split/chunk decomposition
+            # (split_copy) per method before lowering; no-op for the other delegates.
+            for transform in _metal_transforms:
+                exported = transform(exported)
+            method_graphs[name] = exported
 
         # Serialize a defined (zeroed) initial state for the primed streaming buffers
         # so the runtime starts them at zero rather than undefined memory (first-block

@@ -21,7 +21,7 @@ This package has two families of Max objects:
 **Supported models:**  
  - [Live] [RAVE-CoreML](https://github.com/jasper-zheng/RAVE-CoreML) A streamable codec for timbre transfer / latent-space audio manipulation
  - [Live] [SAME-S](https://github.com/jasper-zheng/streamable-same-s): A streamable codec for audio encoding/decoding
- - [Live] [Open-Unmix-Live](#) [Available soon]
+ - [Live] [Open-Unmix-Live](https://github.com/jasper-zheng/open-unmix-maxmsp) Realtime source separation for vocals, drums, bass
  - [Gen] [Stable Audio 3](https://github.com/jasper-zheng/stable-audio-3-tilde): Latent diffusion transformer for text-to-audio, audio-to-audio, inpainting
  - [Gen] [CodiCodec-Flow](https://github.com/jasper-zheng/codicodec-flow) [Available soon]
 
@@ -65,27 +65,24 @@ This package has two families of Max objects:
 - **[XNNPACK](https://github.com/google/XNNPACK)** - CPU inference with optimized kernels.
 - **portable** - plain, unoptimized C++ kernels, maximum compatibility
 - ~~CUDA~~ - Windows CUDA in progress
+<!-- - **[Metal](https://github.com/pytorch/executorch/tree/main/backends/apple/metal)** *(experimental)* - Apple-Silicon GPU via AOTInductor. Compiles the whole graph to a Metal `.so` embedded in the `.pte` **at export time**, so it loads fast (no Core ML–style compile at load). Needs an ExecuTorch runtime built with `-DEXECUTORCH_BUILD_METAL=ON` + **macOS**. -->
 
 
 ## Install the externals
 
-<!-- Download the pre-released externals. To install:
+Download prebuilt externals and Max help patches from the [releases page](https://github.com/neural-tilde/neural-tilde/releases). 
 
-1. Unzip and copy the `neural_tilde` folder into your Max **Packages** folder, e.g.
-   `~/Documents/Max 9/Packages/`.
-2. Restart Max. The streaming objects (`neural.live~`, `mc.neural.live~`, `mcs.neural.live~`) and the
-   generative objects (`neural.gen~`, `neural.tokenizer`) are now available.
+To install: 
+ - Unzip and copy the `neural_tilde` folder into your Max **Packages** folder, e.g. `~/Documents/Max 9/Packages/`
+ - Remove the quarantine flag by running this command in Terminal:  
+    ```bash
+    codesign --force --deep -s - ~/Documents/Max\ 9/Packages/neural_tilde/externals/*.mxo
+    xattr -dr com.apple.quarantine ~/Documents/Max\ 9/Packages/neural_tilde
+    ``` 
+ - Restart Max. All 7 objects will then be available.
+ - If Max give you a warn about quarantine, please proceed.
 
-If macOS quarantines the externals (objects fail to instantiate), clear the quarantine flag or ad-hoc re-sign them. In Terminal, type:
-
-```bash
-cd ~/Documents/Max\ 9/Packages/neural_tilde
-xattr -dr com.apple.quarantine externals/*.mxo
-# or:  codesign --force --deep -s - externals/*.mxo
-``` -->
-
-Compiled externals / Max help patches will be available soon. For now, please build from source (see [Build.md](Build.md)).
-
+If the externals still fail to load, you may consider building the externals yourself by following [Build.md](Build.md).
 
 ## Objects
 
@@ -355,7 +352,7 @@ See the table below for a comparison of the two packages:
 | Real-time streaming | ✅ `neural.live~` | ✅ |
 | Input types | ✅ `signal`, `attribute`, `condition`, `noise`, `buffer` | ❌ only `signal` + `attribute` |
 | Attributes | ✅ Added as native Max attributes | ❌ use `set` / `get` messages |
-| Backends | ✅ CoreML, XNNPack, MLX, MPS, Portable | ❌ only TorchScript |
+| Backends | ✅ CoreML, XNNPack, MLX, MPS, Metal *(experimental)*, Portable | ❌ only TorchScript |
 | Dynamic device | ❌ Fixed when exporting | ✅ Can be switched in runtime |
 | Dynamic buffer size | ❌ Fixed when exporting | ✅ Specified as an argument |
 | Library | ExecuTorch | TorchScript (deprecated in PyTorch 2.10) |

@@ -828,9 +828,10 @@ def main() -> None:
     ap.add_argument("--out", default=None,
                     help="output path; .pte is appended (default: model name without .ts)")
     ap.add_argument("--delegate", default="coreml",
-                    choices=["coreml", "xnnpack", "portable"],
+                    choices=["coreml", "xnnpack", "metal", "portable"],
                     help="ExecuTorch backend (coreml recommended; compiles RNG, but skips "
-                         "FFT-synth methods it can't represent — see module docstring)")
+                         "FFT-synth methods it can't represent — see module docstring). "
+                         "metal is EXPERIMENTAL (AOTInductor; unvalidated for RAVE)")
     ap.add_argument("--buffer-size", type=int, default=None,
                     help="audio block size to bake in (default: the model's largest ratio)")
     ap.add_argument("--rng", default="keep", choices=["keep", "zero"],

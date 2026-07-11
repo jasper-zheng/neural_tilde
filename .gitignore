@@ -19,3 +19,5 @@ docs
 .claude/settings.local.json
 
 new-tokenizer
+
+releases

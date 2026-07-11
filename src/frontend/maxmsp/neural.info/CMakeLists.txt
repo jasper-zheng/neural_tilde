@@ -22,7 +22,7 @@ include_directories(
 
 set(SOURCE_FILES neural.info.cpp)
 
-set(VERSION "0.0.1")
+set(VERSION "0.0.3")
 add_definitions(-DVERSION="${VERSION}")
 
 add_library(

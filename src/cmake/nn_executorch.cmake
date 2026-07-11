@@ -20,6 +20,42 @@ list(APPEND CMAKE_PREFIX_PATH "${EXECUTORCH_ROOT}")
 list(APPEND CMAKE_FIND_ROOT_PATH "${EXECUTORCH_ROOT}")
 find_package(executorch CONFIG REQUIRED FIND_ROOT_PATH_BOTH)
 
+# --- Metal (AOTInductor) delegate: locate a libomp.dylib to ship beside each external ---
+# The Metal runtime + the compiled .so embedded in a Metal .pte both depend on libomp at
+# runtime; torch's libomp has an absolute install id that won't resolve on other machines
+# (see cmake/nn_metal_libomp.sh). Only relevant when EXECUTORCH_ROOT was built with
+# -DEXECUTORCH_BUILD_METAL=ON. Override with -DNN_LIBOMP_PATH=/path/to/libomp.dylib; for an
+# exact ABI match with the AOTI .so, point it at the SAME libomp the ET runtime (torch) used.
+if(TARGET metal_backend)
+  if(NOT NN_LIBOMP_PATH)
+    find_file(NN_LIBOMP_PATH NAMES libomp.dylib
+      PATHS /opt/homebrew/opt/libomp/lib /usr/local/opt/libomp/lib)
+  endif()
+  if(NN_LIBOMP_PATH)
+    message(STATUS "Metal delegate: will bundle libomp from ${NN_LIBOMP_PATH}")
+  else()
+    message(WARNING "Metal delegate is available but NN_LIBOMP_PATH is unset and no libomp.dylib "
+                    "was found (try `brew install libomp` or -DNN_LIBOMP_PATH=...). Metal .pte files "
+                    "will fail to load until libomp is bundled beside the external.")
+  endif()
+endif()
+
+# Absolute path to the bundling helper, captured HERE (CMAKE_CURRENT_LIST_DIR resolves to the
+# caller's dir inside a function, so we must record it at include time).
+set(NN_METAL_LIBOMP_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/nn_metal_libomp.sh" CACHE INTERNAL "")
+
+# POST_BUILD: ship libomp beside ``target`` and repoint its libomp dependency to @rpath.
+# No-op unless the Metal backend is present and a libomp was located.
+function(nn_bundle_metal_libomp target)
+  if(NOT TARGET metal_backend OR NOT NN_LIBOMP_PATH)
+    return()
+  endif()
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND sh "${NN_METAL_LIBOMP_SCRIPT}"
+            "$<TARGET_FILE:${target}>" "${NN_LIBOMP_PATH}"
+    COMMENT "Bundle libomp.dylib for the Metal (AOTI) delegate")
+endfunction()
+
 # Link `target` against the ExecuTorch runtime, CPU op kernels, and the MLX
 # delegate. The imported ET targets already carry `-force_load` via their
 # INTERFACE_LINK_OPTIONS, so op/kernel/backend static initializers register
@@ -73,5 +109,27 @@ function(nn_link_executorch target)
       "-framework Metal"
       "-framework MetalPerformanceShaders"
       "-framework MetalPerformanceShadersGraph")
+  endif()
+  # Metal (AOTInductor) delegate — EXPERIMENTAL. Whole-graph torch._inductor AOT compile is
+  # embedded as an ad-hoc-signed .so in the .pte; the ExecuTorch Metal runtime extracts it to
+  # a temp file and dlopen()s it at load (no CoreML-style .mlmodelc compile at load). The
+  # imported metal_backend target carries -Wl,-export_dynamic via its interface — so the
+  # dlopen'd .so resolves the aoti_torch_* shims from the host external — plus -force_load;
+  # aoti_common provides the ETensor AOTI shims. NOTE: libomp is a runtime dep of the compiled
+  # .so and is bundled beside each external (see the frontend CMakeLists, like mlx.metallib).
+  # cached_conv streaming persistence across the monolithic AOTI fn is UNVERIFIED — smoke-test
+  # neural.live~ before relying on it. Only active once EXECUTORCH_ROOT was built with
+  # -DEXECUTORCH_BUILD_METAL=ON (older installs won't define the target -> this no-ops).
+  if(TARGET metal_backend)
+    target_link_libraries(${target} PRIVATE
+      metal_backend
+      aoti_common
+      "-framework Metal"
+      "-framework Foundation"
+      "-framework MetalPerformanceShaders"
+      "-framework MetalPerformanceShadersGraph")
+    # Ship libomp beside the external + repoint its libomp dep to @rpath (runtime dep of the
+    # AOTI .so). No-op if NN_LIBOMP_PATH was not resolved above.
+    nn_bundle_metal_libomp(${target})
   endif()
 endfunction()
