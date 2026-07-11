@@ -6,9 +6,9 @@
 
 //   [neural.gen~ <model.pte> [method] [buffer]]
 //   <model condition>  one inlet per condition input (see below)
-//   <attr> <value>     model controls       set <buffer>  target buffer~
-//   init <buffer>      audio-to-audio src   seed <n>      rng seed
-//   reload <path>      load a model         generate/bang start generation
+//   <attr> <value>     model controls       set <buffer> [ms]  target buffer~
+//   init <buffer> [ms] audio-to-audio src   seed <n>          rng seed
+//   reload <path>      load a model         generate/bang     start generation
 //
 // The .pte is the model (diffusion, autoencoder, etc.) 
 // The .json is the model's metadata, it contains the model's configuration:
@@ -22,7 +22,11 @@
 //
 // Audio-to-audio: a model whose metadata declares a `buffer`-role input is
 // fed an init waveform from a named buffer~ (`init <buffer>`); the host
-// resamples / channel-maps / crops it.
+// resamples / channel-maps / crops it. An optional trailing offset in
+// milliseconds — `init <buffer> <ms>` — starts the read that far into the source
+// buffer (the fixed-length window becomes [ms, ms + model_len]); crop/pad is
+// unchanged. Likewise `set <buffer> <ms>` places the generated output at `ms`
+// into the target buffer~ instead of resizing it (see on_done).
 //
 // Matrix noise: a `noise`-role gets its own extra inlet that accepts a 
 // Jitter `jit_matrix` in the shape of [planes x H x W], plus a boolean 
@@ -46,6 +50,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -78,8 +83,13 @@ public:
   // Bang fired (on the main thread) when a generation has filled the buffer~.
   outlet<> m_done{this, "(bang) generation finished"};
 
-  // Target buffer~. create_messages=true auto-adds the "set"/"dblclick"/"notify"
-  // messages, so `set <name>` works out of the box.
+  // Target buffer~. create_messages=true so min-api owns the "set"/"dblclick"/
+  // "notify" messages. Their lifetime matters: on patch close ~buffer_reference()
+  // frees m_instance, which makes Max dispatch an unbind "notify" back to us — the
+  // handler MUST outlive that. min-api nests these messages inside buffer_reference
+  // (destroyed only after ~buffer_reference()'s body), so "notify" is always alive
+  // during the unbind. We still take the 2nd `set` arg (start offset) by overriding
+  // just "set" below (set_msg), which is never dispatched during teardown.
   buffer_reference m_buffer{this};
 
   // Optional audio-to-audio init source buffer~. create_messages=false: a second
@@ -186,17 +196,49 @@ public:
         return {};
       }};
 
-  // Audio-to-audio init source: `init <buffer>` points a buffer-role model
-  // at a named buffer~ (read + resampled at generate time); `init` with no arg
-  // (or `init 0`) clears it, so the model generates from silence.
+  // Audio-to-audio init source: `init <buffer> [start_ms]` points a buffer-role
+  // model at a named buffer~ (read + resampled at generate time), optionally
+  // starting the read `start_ms` into the source; `init` with no arg (or `init 0`)
+  // clears it, so the model generates from silence.
   message<> init_msg{
-      this, "init", "Set the audio-to-audio init buffer~ (no arg clears it).",
+      this, "init",
+      "Set the audio-to-audio init buffer~ and start offset in ms. Usage: init [buffer] [start_ms]",
       MIN_FUNCTION {
         if (!args.empty() && args[0].type() == message_type::symbol_argument) {
           m_init_buffer.set(symbol(args[0]));
           m_have_init = true;
+          m_init_offset_ms = args.size() > 1 ? std::max(0.0, (double)args[1]) : 0.0;
         } else {
           m_have_init = false;
+          m_init_offset_ms = 0.0;
+        }
+        return {};
+      }};
+
+  // Target buffer~: `set <buffer> [start_ms]`. With a start offset the output is
+  // placed at `start_ms` into the (unresized) buffer; without one, on_done keeps
+  // the legacy behavior of resizing the buffer to the model's length (see on_done).
+  // This intentionally OVERRIDES min-api's auto "set": messages register by name
+  // into the object's map (c74_min_message.h) and m_buffer (declared first) is
+  // constructed before set_msg, so set_msg's registration wins for "set". Name-based
+  // dispatch then routes `set` here so we can read the 2nd (offset) atom the auto
+  // "set" would drop. dblclick/notify are left to m_buffer's auto messages: their
+  // teardown lifetime must stay under min-api's control (see the m_buffer comment).
+  message<> set_msg{
+      this, "set",
+      "Set the target buffer~ and output start offset in ms. Usage: set [buffer] [start_ms]",
+      MIN_FUNCTION {
+        if (args.empty() || args[0].type() != message_type::symbol_argument) {
+          cerr << "usage: set <buffer> [start_ms]" << endl;
+          return {};
+        }
+        m_buffer.set(symbol(args[0]));
+        if (args.size() > 1) {
+          m_out_offset_ms = std::max(0.0, (double)args[1]);
+          m_have_out_offset = true;
+        } else {
+          m_out_offset_ms = 0.0;
+          m_have_out_offset = false;
         }
         return {};
       }};
@@ -262,6 +304,14 @@ private:
 
   // Audio-to-audio init source: whether `init <buffer>` has been set.
   bool m_have_init{false};
+  // Start offsets (ms) from the `init`/`set` messages, each relative to its own
+  // buffer~'s sample rate. m_have_out_offset selects the output write mode in
+  // on_done: true => place into the (unresized) target at m_out_offset_ms; false
+  // => legacy resize-to-model-length. m_init_offset_ms is applied in
+  // snapshot_init_audio (0 => read from the source start, the previous default).
+  double m_init_offset_ms{0.0};
+  double m_out_offset_ms{0.0};
+  bool m_have_out_offset{false};
 
   // ---- matrix-driven noise ---------------------------------
   // Each noise-role input whose shape folds to planes x H x W within Jitter's
@@ -615,8 +665,11 @@ void gen::snapshot_init_audio() {
   for (int t = 0; t < sframes; t++)
     for (int c = 0; c < sch; c++)
       src[(size_t)c * sframes + t] = b.lookup((size_t)t, (size_t)c);
+  // Start the read m_init_offset_ms into the source (in the source's own frames);
+  // a window past the source end falls back to the existing zero pad.
+  double src_off = std::max(0.0, m_init_offset_ms * 0.001 * ssr);
   GenRunner::prepare_init_audio(src, sch, (size_t)sframes, ssr, dch,
-                                (size_t)dlen, (double)dsr, m_job_init);
+                                (size_t)dlen, (double)dsr, m_job_init, src_off);
 }
 
 // Find the noise-role inputs that a Jitter matrix can drive: the shape folds to
@@ -798,8 +851,15 @@ void gen::on_done() {
     }
   }
 
-  // Resize the buffer~ to the model's length (separate lock: resize may move mem).
+  // Where in the target buffer~ the output starts (frames). Legacy (no `set`
+  // offset): resize the buffer to the model's length and write from frame 0.
+  // Place-mode (`set <buffer> <ms>`): leave the buffer as the user sized it and
+  // write at m_out_offset_ms — converted with the buffer's own sample rate — so
+  // the ms value lands at the right spot on its timeline.
+  int off = 0;
   {
+    // Separate lock from the write: resize may move memory; sizing the offset
+    // needs the buffer's sr, which we read here.
     buffer_lock<false> b(m_buffer);
     if (!b.valid()) {
       cerr << "target buffer~ not set or not found (send 'set "
@@ -808,11 +868,17 @@ void gen::on_done() {
       m_busy.store(false);
       return;
     }
-    if ((int)b.frame_count() != len)
+    if (m_have_out_offset) {
+      double bsr = b.samplerate();
+      if (bsr <= 0.0)
+        bsr = m_out_spec.sample_rate > 0 ? m_out_spec.sample_rate : 44100.0;
+      off = (int)std::llround(std::max(0.0, m_out_offset_ms) * 0.001 * bsr);
+    } else if ((int)b.frame_count() != len) {
       b.resize_in_samples(len);
+    }
   }
 
-  // Write channel-major m_result into the (interleaved) buffer~.
+  // Write channel-major m_result into the (interleaved) buffer~ at `off`.
   {
     buffer_lock<false> b(m_buffer);
     if (!b.valid()) {
@@ -821,21 +887,27 @@ void gen::on_done() {
     }
     int bch = (int)b.channel_count();
     int wch = std::min(ch, bch);
-    int wlen = std::min(len, (int)b.frame_count());
+    // Frames available from `off` to the buffer end; in place-mode the output is
+    // cropped to fit (the region before `off` is left as it was).
+    int wlen = std::max(0, std::min(len, (int)b.frame_count() - off));
     if (bch != ch)
       cerr << "buffer~ has " << bch << " channel(s), model has "
            << ch << " (writing " << wch << ")" << endl;
+    if (m_have_out_offset && wlen < len)
+      cerr << "output cropped: buffer~ holds " << b.frame_count()
+           << " frame(s), need " << (off + len) << " for offset " << off << endl;
     for (int t = 0; t < wlen; t++)
       for (int c = 0; c < wch; c++)
-        b.lookup(t, c) = m_result[(size_t)c * len + t];
+        b.lookup(off + t, c) = m_result[(size_t)c * len + t];
     b.dirty();
   }
 
   // Stamp the buffer~'s sample rate to the model's, so it plays back at the
   // correct speed/pitch regardless of the patcher's rate — the data is at this
   // rate, and groove~/play~ resample by the buffer's reported sr. (Done outside
-  // the lock; sets the rate label only, it does not resize the data.)
-  if (m_out_spec.sample_rate > 0) {
+  // the lock; sets the rate label only, it does not resize the data.) Skipped in
+  // place-mode: we're inserting into an existing timeline, not relabelling it.
+  if (!m_have_out_offset && m_out_spec.sample_rate > 0) {
     c74::max::t_buffer_ref *ref =
         c74::max::buffer_ref_new((c74::max::t_object *)(*this), m_buffer.name());
     if (ref) {

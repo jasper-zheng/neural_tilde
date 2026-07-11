@@ -68,11 +68,15 @@ public:
   // `src_ch` channels of `src_frames` each at `src_sr`. `out` is channel-major
   // `dst_ch * dst_len` at `dst_sr`: mono src duplicates to every dst channel,
   // >dst_ch src takes the first dst_ch; source shorter than dst_len is
-  // zero-padded, longer is cropped.
+  // zero-padded, longer is cropped. `src_offset_frames` shifts where the read
+  // starts in the source (in source frames): the window becomes
+  // [src_offset_frames, src_offset_frames + dst_len·ratio); a window running past
+  // the source end simply yields the existing zero pad.
   static void prepare_init_audio(const std::vector<float> &src, int src_ch,
                                  size_t src_frames, double src_sr, int dst_ch,
                                  size_t dst_len, double dst_sr,
-                                 std::vector<float> &out);
+                                 std::vector<float> &out,
+                                 double src_offset_frames = 0.0);
 
   // Facade over the owned Backend so callers never reach through to it: method
   // listing, typed input/output descriptors.

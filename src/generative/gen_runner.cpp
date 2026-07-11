@@ -67,7 +67,8 @@ void GenRunner::bind_noise(
 void GenRunner::prepare_init_audio(const std::vector<float> &src, int src_ch,
                                    size_t src_frames, double src_sr, int dst_ch,
                                    size_t dst_len, double dst_sr,
-                                   std::vector<float> &out) {
+                                   std::vector<float> &out,
+                                   double src_offset_frames) {
   out.assign((size_t)dst_ch * dst_len, 0.0f);
   if (src_ch <= 0 || dst_ch <= 0 || src_frames == 0 || src_sr <= 0.0 ||
       dst_sr <= 0.0)
@@ -81,7 +82,7 @@ void GenRunner::prepare_init_audio(const std::vector<float> &src, int src_ch,
     const float *srcc = src.data() + (size_t)sc * src_frames;
     float *dstc = out.data() + (size_t)c * dst_len;
     for (size_t t = 0; t < dst_len; t++) {
-      const double pos = (double)t * ratio;
+      const double pos = src_offset_frames + (double)t * ratio;
       const size_t i0 = (size_t)pos;
       if (i0 + 1 < src_frames) {
         const float frac = (float)(pos - (double)i0);

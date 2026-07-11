@@ -21,7 +21,7 @@ include_directories(
 set(SOURCE_FILES mc.neural.live_tilde.cpp)
 
 # Version pinned for the neural package (was: git describe --tags).
-set(VERSION "0.0.3")
+set(VERSION "0.0.4")
 add_definitions(-DVERSION="${VERSION}")
 
 add_library(

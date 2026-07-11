@@ -106,7 +106,7 @@ If the externals still fail to load, you may consider building the externals you
 ### `neural.gen~`:
 
 - **Arguments:** `[neural.gen~ <model.pte> <method> <buffer>]`.
-- **Buffer**: Create a `buffer~` to hold the generated outputs, set its name to `neural.gen~` by the third argument, or with the `set <buffer>` message. 
+- **Buffer**: Create a `buffer~` to hold the generated outputs, set its name to `neural.gen~` by the third argument, or with the `set <buffer>` message. Add an optional start offset in milliseconds — `set <buffer> <ms>` — to place the output at that point in the buffer instead of resizing it: the buffer keeps its length and its content before `<ms>`, the output is written from `<ms>` onward, and anything past the buffer's end is cropped. With no offset, `set <buffer>` resizes the buffer to the model's output length as before. 
 - **Conditions / attributes / noise** (if any) are created according to the `.json` metadata (see [Input Roles](#input-roles)).
 
 > **Notes.** A `buffer~` carries Max's project sample-rate while the mode might have a fixed rate. If your patch runs at a different rate, the data is correct but plays back at the wrong pitch.
@@ -179,7 +179,7 @@ A method may take **several inputs**, each with a **role**. The role is declared
 | `noise` | live / gen | By default, all noises are derived from the "seed" attribute. Alternatively, if a noise input has a shape of [planes × H × W], an inlet will be created, customized noises from **Jitter matrices** are allowed.| initial noise for diffusion, latent noise for codec, etc. |
 | `condition` | live / gen | Additional control vector supplied from inlets, as a `list` (by position) or a `dictionary` (by name). | token IDs, attention mask, inpainting mask, time-varying controls, etc. |
 | `signal` | live only | Multi-channel signal from signal inlets. Supports time-domain compression (e.g., encoder/decoder in a codec that downsamples audio-rate 44.1 kHz to latent-rate 21.5 Hz). Exactly one `signal`-role input per method. | 
-| `buffer` | gen only | An init waveform read from a Max `buffer~` for audio-to-audio. Resampled and cropped to the declared shape. | 
+| `buffer` | gen only | An init waveform read from a Max `buffer~` for audio-to-audio (`init <buffer>`). Resampled and cropped to the declared shape. An optional offset — `init <buffer> <ms>` — starts the read `<ms>` into the source buffer. | 
 
 
 **Two output roles:**
