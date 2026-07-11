@@ -27,7 +27,7 @@ This package has two families of Max objects:
 
 **Note:** Currently only available for MaxMSP on Apple Silicon, macOS. For Windows/CUDA, it's on the todo list. 
 
-**Acknowledgement:** `neural.live~` and its `mc`, `mcs` variants reused an extensive amount of code from [`nn~`](https://github.com/acids-ircam/nn_tilde), migrated from TorchScript/libtorch to more modern ExecuTorch. See [Migrate from `nn~`](#migrate-from-nn). `nn~` is the work by Antoine Caillon & Axel Chemla--Romeu-Santos (acids-ircam), licensed **CC BY-NC 4.0**. 
+**Acknowledgement:** `neural.live~` and its `mc`, `mcs` variants reused an extensive amount of code from [`nn~`](https://github.com/acids-ircam/nn_tilde), migrated from TorchScript/libtorch to more modern ExecuTorch. See [Migrate from nn~](#migrate-from-nn). `nn~` is the work by [acids-ircam](https://github.com/acids-ircam), licensed **CC BY-NC 4.0**. 
 
 
 ## Table of Contents
