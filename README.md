@@ -53,15 +53,15 @@ This package has two families of Max objects:
 
 ## How It Works
 
- - **Export**: Export a PyTorch neural audio model using [ExecuTorch](https://docs.pytorch.org/executorch/main/getting-started.html), with a target hardware backend (see below). This results in a `.pte` (the runnable program + weights) file.  
- - **Config**: Create a `.json` metadata file that details inlet/outlet, ratio, attributes, condition shapes, etc. 
+ - **Export**: Export a PyTorch neural audio model using [ExecuTorch](https://docs.pytorch.org/executorch/main/getting-started.html), with a target hardware backend (see below). This results in a `.pte` (the model program + weights) file.  
+ - **Config**: Register a `.json` metadata by the Python tool, detailing inlet/outlet, attributes, condition shapes, etc. 
  - **Load**: Hand `neural.live~` / `neural.gen~` the `.pte` and `.json` files in Max.
 
 ### Supported back-ends:
 
 - **[MLX](https://github.com/ml-explore/mlx)** - Uses Apple-Silicon GPU.
-- **[Core ML](https://developer.apple.com/documentation/coreml)** - Uses all compute units by default (CPU / GPU / ANE); selectable via the `coreml_compute_units` export kwarg. Needs **macOS 15+** at runtime.
-- **[MPS](https://docs.pytorch.org/executorch/stable/backends/mps/mps-overview.html)** - Apple-Silicon GPU via MPSGraph. (Deprecated by ExecuTorch, use Core ML or MLX instead)
+- **[Core ML](https://developer.apple.com/documentation/coreml)** - Uses all compute units by default (CPU / GPU / ANE). Needs **macOS 15+** at runtime.
+- **[MPS](https://docs.pytorch.org/executorch/stable/backends/mps/mps-overview.html)** - Apple-Silicon GPU via MPSGraph. (Deprecated by ExecuTorch, use CoreML or MLX instead)
 - **[XNNPACK](https://github.com/google/XNNPACK)** - CPU inference with optimized kernels.
 - **portable** - plain, unoptimized C++ kernels, maximum compatibility
 - ~~CUDA~~ - Windows CUDA in progress
@@ -108,8 +108,6 @@ If the externals still fail to load, you may consider building the externals you
 - **Arguments:** `[neural.gen~ <model.pte> <method> <buffer>]`.
 - **Buffer**: Create a `buffer~` to hold the generated outputs, set its name to `neural.gen~` by the third argument, or with the `set <buffer>` message. Add an optional start offset in milliseconds — `set <buffer> <ms>` — to place the output at that point in the buffer instead of resizing it: the buffer keeps its length and its content before `<ms>`, the output is written from `<ms>` onward, and anything past the buffer's end is cropped. With no offset, `set <buffer>` resizes the buffer to the model's output length as before. 
 - **Conditions / attributes / noise** (if any) are created according to the `.json` metadata (see [Input Roles](#input-roles)).
-
-> **Notes.** A `buffer~` carries Max's project sample-rate while the mode might have a fixed rate. If your patch runs at a different rate, the data is correct but plays back at the wrong pitch.
 
 ### `mc.neural.live~` / `mcs.neural.live~`:
 Use `mc.neural.live~` to run one model across every channel of an `mc.` patch cord, or
@@ -375,5 +373,4 @@ Please refer to [Build.md](Build.md)
 
 ## Credits
 
-`neural.live~` and its `mc`/`mcs` variants' C++ externals and the Python tools derive from `nn~` by Antoine Caillon and
-Axel Chemla--Romeu-Santos (ACIDS-IRCAM).
+`neural.live~` and its `mc`/`mcs` variants' C++ externals and the Python tools derive from `nn~` by ACIDS-IRCAM.
