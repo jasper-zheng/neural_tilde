@@ -70,7 +70,7 @@ This package has two families of Max objects:
 
 ## Install the externals
 
-Download prebuilt externals and Max help patches from the [releases page](https://github.com/jasper-zheng/neural-tilde/releases). 
+Download prebuilt externals and Max help patches from the [releases page](https://github.com/jasper-zheng/neural_tilde/releases). 
 
 To install: 
  - Unzip and copy the `neural_tilde` folder into your Max **Packages** folder, e.g. `~/Documents/Max 9/Packages/`
