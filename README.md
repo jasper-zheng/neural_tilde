@@ -106,7 +106,7 @@ If the externals still fail to load, you may consider building the externals you
 ### `neural.gen~`:
 
 - **Arguments:** `[neural.gen~ <model.pte> <method> <buffer>]`.
-- **Buffer**: Create a `buffer~` to hold the generated outputs, set its name to `neural.gen~` by the third argument, or with the `set <buffer>` message. Add an optional start offset in milliseconds — `set <buffer> <ms>` — to place the output at that point in the buffer instead of resizing it: the buffer keeps its length and its content before `<ms>`, the output is written from `<ms>` onward, and anything past the buffer's end is cropped. With no offset, `set <buffer>` resizes the buffer to the model's output length as before. 
+- **Buffer**: Create a `buffer~` to hold the generated outputs, set its name to `neural.gen~` by the third argument, or with the `set <buffer>` message. 
 - **Conditions / attributes / noise** (if any) are created according to the `.json` metadata (see [Input Roles](#input-roles)).
 
 ### `mc.neural.live~` / `mcs.neural.live~`:
