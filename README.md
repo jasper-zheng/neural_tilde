@@ -177,7 +177,7 @@ A method may take **several inputs**, each with a **role**. The role is declared
 | `noise` | live / gen | By default, all noises are derived from the "seed" attribute. Alternatively, if a noise input has a shape of [planes × H × W], an inlet will be created, customized noises from **Jitter matrices** are allowed.| initial noise for diffusion, latent noise for codec, etc. |
 | `condition` | live / gen | Additional control vector supplied from inlets, as a `list` (by position) or a `dictionary` (by name). | token IDs, attention mask, inpainting mask, time-varying controls, etc. |
 | `signal` | live only | Multi-channel signal from signal inlets. Supports time-domain compression (e.g., encoder/decoder in a codec that downsamples audio-rate 44.1 kHz to latent-rate 21.5 Hz). Exactly one `signal`-role input per method. | 
-| `buffer` | gen only | An init waveform read from a Max `buffer~` for audio-to-audio (`init <buffer>`). Resampled and cropped to the declared shape. An optional offset — `init <buffer> <ms>` — starts the read `<ms>` into the source buffer. | 
+| `buffer` | gen only | Data read from a Max `buffer~`: an init waveform for audio-to-audio (`init <buffer>`), resampled and cropped to the declared shape unless `"resample": false`. An optional offset — `init <buffer> <ms>` — starts the read `<ms>` into the source buffer. With several buffer inputs, `init <input> <buffer> [ms]` sets each by name. | 
 
 
 **Two output roles:**

@@ -71,7 +71,7 @@ Mirrors `PROTOCOL.md` [§2.4](../../../PROTOCOL.md#24-input-roles). The host fil
 | `condition` | live + gen | `register_condition(name, shape, dtype="float32", description="")` | `name`, `role`, `shape` (any rank), `dtype` (`int64`/`int32`/`float32`); optional `description` |
 | `noise` | live + gen | `register_noise(name, shape, dtype="float32")` | `name`, `role`, `shape`, `dtype` (`float32`) |
 | `signal` | live only | *not registered* — declared via `register_method(...)` `in_channels`/`in_ratio`/`input_labels` | `name:"signal"`, `role`, `channels`, `ratio`; optional `labels` |
-| `buffer` | gen only | `GenModule.register_buffer_input(name, channels, length, sample_rate=44100, description="", dtype="float32")` | `name`, `role`, `shape:[1,channels,length]`, `dtype`, `channels`, `length`, `sample_rate`; optional `description` |
+| `buffer` | gen only | `GenModule.register_buffer_input(name, channels, length, sample_rate=44100, description="", dtype="float32", resample=True, pad_value=0.0)` — `resample=False` for control curves (e.g. a 50 Hz F0) copied 1:1 from the `buffer~`; a method may take several (`init <name> <buffer>` in Max) | `name`, `role`, `shape:[1,channels,length]`, `dtype`, `channels`, `length`, `sample_rate`; optional `description`, `resample` (only if false), `pad_value` (only if ≠ 0) |
 
 Token conditions are `int64` (ids) and `int32` (attention masks). Noise is host-sampled
 `N(0,1)`, reproducible from the top-level `seed`, so keep RNG **out** of the model graph.

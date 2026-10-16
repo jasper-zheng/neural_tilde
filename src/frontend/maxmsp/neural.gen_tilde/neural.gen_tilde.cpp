@@ -8,6 +8,7 @@
 //   <model condition>  one inlet per condition input (see below)
 //   <attr> <value>     model controls       set <buffer> [ms]  target buffer~
 //   init <buffer> [ms] audio-to-audio src   seed <n>          rng seed
+//   init <input> <buffer> [ms]  source of one named buffer input
 //   reload <path>      load a model         generate/bang     start generation
 //
 // The .pte is the model (diffusion, autoencoder, etc.) 
@@ -20,13 +21,17 @@
 //  - or a `list`: (matched by inlet position to a condition, so the first inlet fills the first condition, etc.) 
 // A condition left unsupplied at generate time is zero-filled with a warning.
 //
-// Audio-to-audio: a model whose metadata declares a `buffer`-role input is
-// fed an init waveform from a named buffer~ (`init <buffer>`); the host
-// resamples / channel-maps / crops it. An optional trailing offset in
-// milliseconds — `init <buffer> <ms>` — starts the read that far into the source
-// buffer (the fixed-length window becomes [ms, ms + model_len]); crop/pad is
-// unchanged. Likewise `set <buffer> <ms>` places the generated output at `ms`
-// into the target buffer~ instead of resizing it (see on_done).
+// Buffer inputs: a model whose metadata declares `buffer`-role inputs is fed
+// each from a named buffer~. `init <input> <buffer>` sets the source of one input
+// by name; `init <buffer>` sets the first (the only one, for most models). The
+// host resamples / channel-maps / crops each by its own metadata, or copies it
+// 1:1 when the input says "resample": false (control curves such as a 50 Hz F0,
+// whose buffer~ rate is then ignored); past the source end it pads with the
+// input's pad_value. An optional trailing offset in milliseconds — `init
+// [input] <buffer> <ms>` — starts the read that far into the source (at the
+// buffer~'s rate when resampling, at the declared rate for 1:1). Likewise `set
+// <buffer> <ms>` places the generated output at `ms` into the target buffer~
+// instead of resizing it (see on_done).
 //
 // Matrix noise: a `noise`-role gets its own extra inlet that accepts a 
 // Jitter `jit_matrix` in the shape of [planes x H x W], plus a boolean 
@@ -92,10 +97,9 @@ public:
   // just "set" below (set_msg), which is never dispatched during teardown.
   buffer_reference m_buffer{this};
 
-  // Optional audio-to-audio init source buffer~. create_messages=false: a second
-  // reference must not register its own set/dblclick/notify (they would collide
-  // with m_buffer's). Driven by our own `init <name>` message instead.
-  buffer_reference m_init_buffer{this, nullptr, false};
+  // Buffer-input sources are kept by name (m_init_src) and read through a
+  // short-lived buffer_reference at generate time (snapshot_init_audio), so a
+  // model may take any number of buffer inputs.
 
   // ---- controls -----------------------------------------------------------
   // `seed` is a host RNG control, not a
@@ -196,22 +200,17 @@ public:
         return {};
       }};
 
-  // Audio-to-audio init source: `init <buffer> [start_ms]` points a buffer-role
-  // model at a named buffer~ (read + resampled at generate time), optionally
-  // starting the read `start_ms` into the source; `init` with no arg (or `init 0`)
-  // clears it, so the model generates from silence.
+  // Buffer-input sources: `init <input> <buffer> [start_ms]` points the buffer
+  // input named <input> at a named buffer~ (read at generate time), optionally
+  // starting the read `start_ms` into it; `init <buffer> [start_ms]` does the
+  // same for the first buffer input. `init` with no arg (or `init 0`) clears all
+  // sources, so every buffer input is filled with its pad_value.
   message<> init_msg{
       this, "init",
-      "Set the audio-to-audio init buffer~ and start offset in ms. Usage: init [buffer] [start_ms]",
+      "Set a buffer input's source buffer~ and start offset in ms. Usage: init "
+      "[input] [buffer] [start_ms]",
       MIN_FUNCTION {
-        if (!args.empty() && args[0].type() == message_type::symbol_argument) {
-          m_init_buffer.set(symbol(args[0]));
-          m_have_init = true;
-          m_init_offset_ms = args.size() > 1 ? std::max(0.0, (double)args[1]) : 0.0;
-        } else {
-          m_have_init = false;
-          m_init_offset_ms = 0.0;
-        }
+        receive_init(args);
         return {};
       }};
 
@@ -302,14 +301,18 @@ private:
   // conditions are zero-filled per-job at generate time.
   std::map<std::string, std::vector<char>> m_cond;
 
-  // Audio-to-audio init source: whether `init <buffer>` has been set.
-  bool m_have_init{false};
-  // Start offsets (ms) from the `init`/`set` messages, each relative to its own
-  // buffer~'s sample rate. m_have_out_offset selects the output write mode in
-  // on_done: true => place into the (unresized) target at m_out_offset_ms; false
-  // => legacy resize-to-model-length. m_init_offset_ms is applied in
-  // snapshot_init_audio (0 => read from the source start, the previous default).
-  double m_init_offset_ms{0.0};
+  // Buffer-input sources from `init`: buffer-input name -> source buffer~ + read
+  // offset (ms; applied in snapshot_init_audio, 0 => from the source start). An
+  // input absent here is filled with its pad_value.
+  struct InitSource {
+    symbol buffer;
+    double offset_ms;
+  };
+  std::map<std::string, InitSource> m_init_src;
+  // Output start offset (ms, at the target buffer~'s rate) from `set`.
+  // m_have_out_offset selects the output write mode in on_done: true => place
+  // into the (unresized) target at m_out_offset_ms; false => legacy
+  // resize-to-model-length.
   double m_out_offset_ms{0.0};
   bool m_have_out_offset{false};
 
@@ -337,7 +340,9 @@ private:
   // job snapshot + result
   std::map<std::string, std::vector<char>> m_job_cond;
   std::map<std::string, double> m_job_attrs;
-  std::vector<float> m_job_init; // channel-major init audio, empty => silence
+  // Per-job buffer inputs (name -> channel-major floats at the input geometry);
+  // an input missing here is filled with its pad_value inside generate().
+  std::map<std::string, std::vector<float>> m_job_init;
   // Per-job snapshot of matrix-driven noise (name -> float values); only inputs
   // whose `<name>_inlet` toggle is on with a valid matrix appear here, the rest
   // stay seeded inside generate().
@@ -360,6 +365,8 @@ private:
   void receive_dict(const atoms &args);
   void receive_list(const atoms &args, int inlet);
   void receive_matrix(const atoms &args, int inlet);
+  void receive_init(const atoms &args);
+  std::vector<const InputSpec *> buffer_inputs();
   void snapshot_init_audio();
   void detect_matrix_noise();
   void trigger();
@@ -413,8 +420,13 @@ void gen::add_dynamic_attributes() {
   for (const auto &in : m_runner.gen_inputs(m_method)) {
     if (in.role != Role::Attribute)
       continue;
+    // int64 inputs become Max `long` attributes (whole numbers in the
+    // inspector); the value is still read as a double in trigger() and rounded
+    // to int64 by GenRunner::generate.
+    const bool is_int = in.dtype == executorch::aten::ScalarType::Long;
     c74::max::t_object *attr = (c74::max::t_object *)c74::max::attribute_new(
-        in.name.c_str(), c74::max::gensym("float64"), 0, nullptr, nullptr);
+        in.name.c_str(), c74::max::gensym(is_int ? "long" : "float64"), 0,
+        nullptr, nullptr);
     if (!attr)
       continue;
     if (in.max > in.min)
@@ -458,6 +470,19 @@ void gen::load_model(std::string model_path) {
     detect_matrix_noise();    // find matrix-drivable noise inputs (for attrs)
     build_condition_meta();   // re-resolve condition inlets + reset cache (reload-safe)
     add_dynamic_attributes(); // expose the model's scalar params as attributes
+    // Keep only the `init` sources whose input still exists (reload-safe); a
+    // legacy `init <buffer>` sent before any model loaded (key "") goes to the
+    // first buffer input.
+    {
+      std::map<std::string, InitSource> kept;
+      const auto bis = buffer_inputs();
+      for (const auto *bi : bis)
+        if (m_init_src.count(bi->name))
+          kept[bi->name] = m_init_src[bi->name];
+      if (!bis.empty() && !kept.count(bis.front()->name) && m_init_src.count(""))
+        kept[bis.front()->name] = m_init_src[""];
+      m_init_src.swap(kept);
+    }
     if (m_runnable) {
       cout << "loaded " << abs << endl;
     } else {
@@ -515,10 +540,17 @@ void gen::receive_dict(const atoms &args) {
       continue; // condition not present in THIS dict — leave the cache as is
     long argc = 0;
     c74::max::t_atom *argv = nullptr;
+    c74::max::t_atom single;
     if (c74::max::dictionary_getatoms(d, key, &argc, &argv) !=
             c74::max::MAX_ERR_NONE ||
-        !argv)
-      continue;
+        !argv || argc <= 0) {
+      // A scalar entry (e.g. JSON `"language": 3` for a [1, 1] condition):
+      // read it as a 1-element list.
+      if (c74::max::dictionary_getatom(d, key, &single) != c74::max::MAX_ERR_NONE)
+        continue;
+      argc = 1;
+      argv = &single;
+    }
     m_cond[in.name] = cond_atoms_to_bytes(
         in.dtype, argc, [&](long k) { return c74::max::atom_getlong(argv + k); },
         [&](long k) { return c74::max::atom_getfloat(argv + k); });
@@ -579,7 +611,8 @@ gen::gen(const atoms &args) {
   // above (build_condition_meta), the same way m_matrix_noise is.
   if (m_cond_inlets.empty()) {
     m_inlets.push_back(std::make_unique<inlet<>>(
-        this, "control: generate/bang, dictionary, init, attributes"));
+        this, "control: generate/bang, dictionary, init [input] <buffer> [ms], "
+              "attributes"));
   } else {
     // Label each condition inlet with the tensor it expects (name + shape +
     // dtype + optional description), built from the same gen_inputs() the inlet
@@ -591,7 +624,7 @@ gen::gen(const atoms &args) {
       std::string label =
           cond_inlet_label(in) + " (list, or dictionary by name)";
       if (i == 0)
-        label += " + control: generate/bang, init, attributes";
+        label += " + control: generate/bang, init [input] <buffer> [ms], attributes";
       m_inlets.push_back(std::make_unique<inlet<>>(this, label));
       i++;
     }
@@ -624,52 +657,95 @@ gen::~gen() {
     m_worker.join();
 }
 
-// Read the init source buffer~ and preprocess it (resample / channel-map /
-// crop-pad) into m_job_init at the buffer input's geometry. Runs on the main
-// thread (buffer access) as part of the trigger snapshot. Leaves m_job_init empty
-// (=> the model is fed silence) when the model takes no init audio, none is set,
-// or the source buffer~ is missing.
-void gen::snapshot_init_audio() {
-  m_job_init.clear();
-  const InputSpec *ai = nullptr;
+// The loaded method's buffer-role inputs, in declared order.
+std::vector<const InputSpec *> gen::buffer_inputs() {
+  std::vector<const InputSpec *> v;
+  if (!m_loaded)
+    return v;
   for (const auto &in : m_runner.gen_inputs(m_method))
     if (in.role == Role::Buffer)
-      ai = &in;
-  if (!ai)
-    return; // model doesn't take an init waveform
-  if (!m_have_init) {
-    cerr << "no init audio set, generating from silence (please send 'init <buffer>')"
-         << endl;
+      v.push_back(&in);
+  return v;
+}
+
+// `init` message: see init_msg. `init <input> <buffer> [ms]` is recognised when
+// the first atom names a buffer input AND the second is a symbol; anything else
+// with a leading symbol is the legacy `init <buffer> [ms]` (=> first input).
+void gen::receive_init(const atoms &args) {
+  if (args.empty() || args[0].type() != message_type::symbol_argument) {
+    m_init_src.clear(); // `init` / `init 0`: clear every source
     return;
   }
-
-  // Target geometry: channels/length from the input shape [.., C, L], sample
-  // rate from its metadata sample_rate, else the output's.
-  const auto &sh = ai->shape;
-  int dch = sh.size() >= 2 ? sh[sh.size() - 2] : 1;
-  int dlen = sh.size() >= 1 ? sh[sh.size() - 1] : 0;
-  int dsr = ai->sample_rate > 0 ? ai->sample_rate : m_out_spec.sample_rate;
-  if (dsr <= 0)
-    dsr = 44100;
-
-  buffer_lock<false> b(m_init_buffer);
-  if (!b.valid()) {
-    cerr << "init buffer~ '" << std::string(m_init_buffer.name())
-         << "' not found, generating from silence" << endl;
+  const auto bis = buffer_inputs();
+  if (m_loaded && bis.empty()) {
+    cerr << "the method has no buffer input, 'init' ignored" << endl;
     return;
   }
-  int sch = (int)b.channel_count();
-  int sframes = (int)b.frame_count();
-  double ssr = b.samplerate();
-  std::vector<float> src((size_t)sch * sframes);
-  for (int t = 0; t < sframes; t++)
-    for (int c = 0; c < sch; c++)
-      src[(size_t)c * sframes + t] = b.lookup((size_t)t, (size_t)c);
-  // Start the read m_init_offset_ms into the source (in the source's own frames);
-  // a window past the source end falls back to the existing zero pad.
-  double src_off = std::max(0.0, m_init_offset_ms * 0.001 * ssr);
-  GenRunner::prepare_init_audio(src, sch, (size_t)sframes, ssr, dch,
-                                (size_t)dlen, (double)dsr, m_job_init, src_off);
+  const std::string a0 = std::string(args[0]);
+  const InputSpec *named = nullptr;
+  for (const auto *bi : bis)
+    if (bi->name == a0)
+      named = bi;
+  if (named && args.size() >= 2 &&
+      args[1].type() == message_type::symbol_argument) {
+    double ms = args.size() > 2 ? std::max(0.0, (double)args[2]) : 0.0;
+    m_init_src[named->name] = {symbol(args[1]), ms};
+    return;
+  }
+  double ms = args.size() > 1 ? std::max(0.0, (double)args[1]) : 0.0;
+  // Before a model is loaded there are no names to key by; keep the 0.0.4
+  // meaning under the first input once one exists (load_model prunes).
+  const std::string target = bis.empty() ? std::string() : bis.front()->name;
+  if (bis.size() > 1)
+    cwarn << "the method has " << bis.size() << " buffer inputs, 'init " << a0
+          << "' sets the first ('" << target << "'); use 'init <input> <buffer>'"
+          << endl;
+  m_init_src[target] = {symbol(args[0]), ms};
+}
+
+// Read each buffer input's source buffer~ into m_job_init, preprocessed by that
+// input's metadata (GenRunner::prepare_buffer_input: resample or 1:1, channel
+// map, crop, pad_value). Runs on the main thread (buffer access) as part of the
+// trigger snapshot. An input with no source, or whose buffer~ is missing, is
+// left out (=> generate() fills it with its pad_value) with a warning.
+void gen::snapshot_init_audio() {
+  m_job_init.clear();
+  for (const auto *bi : buffer_inputs()) {
+    auto it = m_init_src.find(bi->name);
+    if (it == m_init_src.end()) {
+      cwarn << "no source for buffer input '" << bi->name << "', filling with "
+            << bi->pad_value << " (send 'init " << bi->name << " <buffer>')"
+            << endl;
+      continue;
+    }
+    buffer_reference ref{this, nullptr, false};
+    ref.set(it->second.buffer);
+    if (!ref) {
+      cerr << "buffer~ '" << std::string(it->second.buffer) << "' for input '"
+           << bi->name << "' not found, filling with " << bi->pad_value << endl;
+      continue;
+    }
+    buffer_lock<false> b(ref);
+    // An existing but empty buffer~ (no samples) is a 0-frame source => all pad.
+    int sch = (int)b.channel_count();
+    int sframes = b.valid() ? (int)b.frame_count() : 0;
+    if (sframes == 0)
+      cwarn << "buffer~ '" << std::string(it->second.buffer) << "' for input '"
+            << bi->name << "' is empty, filling with " << bi->pad_value << endl;
+    double ssr = b.samplerate();
+    std::vector<float> src((size_t)sch * sframes);
+    for (int t = 0; t < sframes; t++)
+      for (int c = 0; c < sch; c++)
+        src[(size_t)c * sframes + t] = b.lookup((size_t)t, (size_t)c);
+    const auto g = GenRunner::buffer_geometry(*bi, m_out_spec.sample_rate);
+    if (!bi->resample && std::lround(ssr) != g.sr)
+      cwarn << "buffer~ '" << std::string(it->second.buffer) << "' is read 1:1 into '"
+            << bi->name << "'; its sample rate " << ssr
+            << " Hz is ignored (declared " << g.sr << " Hz)" << endl;
+    GenRunner::prepare_buffer_input(*bi, m_out_spec.sample_rate, src, sch,
+                                    (size_t)sframes, ssr, it->second.offset_ms,
+                                    m_job_init[bi->name]);
+  }
 }
 
 // Find the noise-role inputs that a Jitter matrix can drive: the shape folds to
@@ -788,7 +864,7 @@ void gen::trigger() {
   for (const auto &s : m_attr_slots)
     m_job_attrs[s.name] = c74::max::object_attr_getfloat(
         (c74::max::t_object *)(*this), c74::max::gensym(s.name.c_str()));
-  snapshot_init_audio(); // fills m_job_init (empty => silence)
+  snapshot_init_audio(); // fills m_job_init (missing inputs => pad_value)
   // Snapshot matrix-driven noise for any matrix-noise input whose `<name>_inlet`
   // toggle is on and that has a valid matrix; the rest stay seeded.
   m_job_noise.clear();
@@ -818,12 +894,12 @@ void gen::worker_loop() {
       if (m_should_stop.load())
         break;
       // Bind the snapshotted conditioning to the model's condition inputs by
-      // name, plus any init waveform onto its buffer input and any matrix-driven
+      // name, plus each buffer onto its buffer input and any matrix-driven
       // noise onto its noise inputs (each a no-op if none was supplied).
       std::map<std::string, SuppliedInput> supplied;
       const auto &inputs = m_runner.gen_inputs(m_method);
       GenRunner::bind_condition(inputs, m_job_cond, supplied);
-      GenRunner::bind_init_audio(inputs, m_job_init, supplied);
+      GenRunner::bind_buffers(inputs, m_job_init, supplied);
       GenRunner::bind_noise(inputs, m_job_noise, supplied);
       m_gen_ok = m_runner.generate(m_method, supplied, m_job_attrs, m_job_seed,
                                    m_result);
@@ -857,17 +933,18 @@ void gen::on_done() {
   // write at m_out_offset_ms — converted with the buffer's own sample rate — so
   // the ms value lands at the right spot on its timeline.
   int off = 0;
+  // Existence, not buffer_lock::valid(): valid() is false for a buffer~ that
+  // exists but has no samples yet (e.g. `[buffer~ f0]` with no size), which is
+  // exactly the buffer the legacy mode resizes below.
+  if (!m_buffer) {
+    cerr << "target buffer~ not set or not found (send 'set <name>')" << endl;
+    m_busy.store(false);
+    return;
+  }
   {
     // Separate lock from the write: resize may move memory; sizing the offset
     // needs the buffer's sr, which we read here.
     buffer_lock<false> b(m_buffer);
-    if (!b.valid()) {
-      cerr << "target buffer~ not set or not found (send 'set "
-              "<name>')"
-           << endl;
-      m_busy.store(false);
-      return;
-    }
     if (m_have_out_offset) {
       double bsr = b.samplerate();
       if (bsr <= 0.0)
@@ -882,6 +959,8 @@ void gen::on_done() {
   {
     buffer_lock<false> b(m_buffer);
     if (!b.valid()) {
+      cerr << "target buffer~ '" << std::string(m_buffer.name())
+           << "' has no samples to write into" << endl;
       m_busy.store(false);
       return;
     }
@@ -916,6 +995,15 @@ void gen::on_done() {
         c74::max::atom_setfloat(&a, (double)m_out_spec.sample_rate);
         c74::max::object_method_typed((c74::max::t_object *)buf,
                                       c74::max::gensym("sr"), 1, &a, nullptr);
+        // Read the rate back: if Max refused or clamped it (e.g. a 50 Hz control
+        // curve), say so. The samples are unchanged either way, and a buffer
+        // input with "resample": false ignores the buffer~'s rate.
+        const double got = c74::max::buffer_getsamplerate(buf);
+        if (std::fabs(got - (double)m_out_spec.sample_rate) > 1e-6)
+          cwarn << "buffer~ '" << std::string(m_buffer.name())
+                << "' did not take sample rate " << m_out_spec.sample_rate
+                << " Hz (reports " << got << " Hz); the data is unchanged"
+                << endl;
       }
       c74::max::object_free(ref);
     }

@@ -183,10 +183,13 @@ m.register_method("forward", in_channels=1, in_ratio=1, out_channels=1, out_rati
 
 #### 2.4.5 Buffer  (gen only)
 
-An initial waveform read from a Max `buffer~` for audio-to-audio, the shape is `[1, channels, length]`, the host resamples / channel-maps / crops the source clip to the declared shape.
+Data read from a Max `buffer~`, with shape `[1, channels, length]`. By default it is treated as audio (e.g. an init waveform for audio-to-audio): the host resamples the `buffer~` from its own sample rate to `sample_rate`, maps the channels and crops/pads to `length`.
 
 - **Required:** `name`, `role: "buffer"`, `shape: [1, channels, length]`, `dtype` (`"float32"`), `channels`, `length`, `sample_rate`.
-- **Optional:** `description`. (`channels`/`length` are duplicated in `shape`)
+- **Optional:** 
+  - `description`. (`channels`/`length` are duplicated in `shape`)
+  - `resample` (default `true`): `false` copies the samples **1:1**, ignoring the `buffer~`'s sample rate.
+  - `pad_value` (default `0.0`): fills past the end of the source, and the whole input when no `buffer~` is set.
 
 ```jsonc
 { "name": "init_audio", "role": "buffer", "shape": [1, 2, 131072], "dtype": "float32",
@@ -194,11 +197,32 @@ An initial waveform read from a Max `buffer~` for audio-to-audio, the shape is `
   "description": "Init audio to vary from." }
 ```
 
-**Python:** `GenModule.register_buffer_input(name, channels, length, sample_rate=44100, description="", dtype="float32")`.
-
 ```python
 m.register_buffer_input("init_audio", channels=2, length=131072, sample_rate=44100,
                         description="Init audio to vary from.")
+```
+
+**Note:** Use `"resample": false` for a buffer input that is not audio, such as a control-rate signal, e.g. a 50 Hz F0 curve or a latent signal. With `"resample": false` the host:
+ - reads `length` samples per channel from the `buffer~`, starting at the `init` offset, which is converted from ms at the **declared** `sample_rate`;
+ - maps channels as for audio (a mono source is copied to every channel; extra source channels are dropped);
+ - fills the rest with `pad_value`; a longer source is simply cropped;
+ - posts a warning when the `buffer~`'s sample rate differs from the declared one (the data is still read 1:1).
+
+**Use `init <input> <buffer> [start_ms]` message to set the source of a buffer in Max**. A method may declare several buffer inputs. Each is read with its own shape, sample rate, `resample` and `pad_value`. In `neural.gen~`:
+ - `init <input> <buffer> [start_ms]` sets the source of the buffer input named `<input>`;
+ - `init <buffer> [start_ms]` sets the first buffer input (the only one, for most models); with several it posts a warning;
+ - `init` (no argument) clears every source;
+ - an input with no source is filled with its `pad_value`, with a warning.
+
+E.g., in the example below, to feed an 50Hz F0 curve from a `buffer~` named `f0buf`, use the message `init f0 f0buf 100` will skip the first 5 samples (100 ms at 50 Hz) and read the next 1,003 samples into the `f0` input.
+
+```jsonc
+{ "name": "f0", "role": "buffer", "shape": [1, 1, 1003], "dtype": "float32",
+  "channels": 1, "length": 1003, "sample_rate": 50, "resample": false }
+```
+
+```python
+m.register_buffer_input("f0", channels=1, length=1003, sample_rate=50, resample=False)
 ```
 
 ### 2.5 Output Roles

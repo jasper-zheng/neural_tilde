@@ -3,6 +3,7 @@
 #include "../backend/noise_seed.h" // noise_substream_seed (shared with Backend)
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -39,14 +40,19 @@ void GenRunner::bind_condition(
   }
 }
 
-void GenRunner::bind_init_audio(const std::vector<InputSpec> &inputs,
-                                const std::vector<float> &init,
-                                std::map<std::string, SuppliedInput> &supplied) {
-  if (init.empty())
-    return; // nothing supplied => generate() fills buffer input with silence
-  for (const auto &in : inputs)
-    if (in.role == Role::Buffer)
-      supplied[in.name] = {ScalarType::Float, init.data(), init.size()};
+void GenRunner::bind_buffers(
+    const std::vector<InputSpec> &inputs,
+    const std::map<std::string, std::vector<float>> &buffers,
+    std::map<std::string, SuppliedInput> &supplied) {
+  for (const auto &in : inputs) {
+    if (in.role != Role::Buffer)
+      continue;
+    auto it = buffers.find(in.name);
+    if (it == buffers.end() || it->second.empty())
+      continue; // not supplied => generate() fills it with pad_value
+    supplied[in.name] = {ScalarType::Float, it->second.data(),
+                         it->second.size()};
+  }
 }
 
 void GenRunner::bind_noise(
@@ -68,8 +74,8 @@ void GenRunner::prepare_init_audio(const std::vector<float> &src, int src_ch,
                                    size_t src_frames, double src_sr, int dst_ch,
                                    size_t dst_len, double dst_sr,
                                    std::vector<float> &out,
-                                   double src_offset_frames) {
-  out.assign((size_t)dst_ch * dst_len, 0.0f);
+                                   double src_offset_frames, float pad_value) {
+  out.assign((size_t)dst_ch * dst_len, pad_value);
   if (src_ch <= 0 || dst_ch <= 0 || src_frames == 0 || src_sr <= 0.0 ||
       dst_sr <= 0.0)
     return; // leave silence
@@ -90,8 +96,58 @@ void GenRunner::prepare_init_audio(const std::vector<float> &src, int src_ch,
       } else if (i0 < src_frames) {
         dstc[t] = srcc[i0]; // last source sample, no successor to interp with
       }
-      // else: past the source end => leave the pre-zeroed pad
+      // else: past the source end => leave the pre-filled pad
     }
+  }
+}
+
+void GenRunner::copy_buffer_asis(const std::vector<float> &src, int src_ch,
+                                 size_t src_frames, int dst_ch, size_t dst_len,
+                                 std::vector<float> &out, size_t offset_frames,
+                                 float pad_value) {
+  out.assign((size_t)dst_ch * dst_len, pad_value);
+  if (src_ch <= 0 || dst_ch <= 0 || offset_frames >= src_frames)
+    return; // nothing to copy => all pad
+  const size_t n = std::min(dst_len, src_frames - offset_frames);
+  for (int c = 0; c < dst_ch; c++) {
+    // Same channel map as prepare_init_audio: mono duplicates, extra src
+    // channels beyond dst_ch are dropped.
+    const int sc = std::min(c, src_ch - 1);
+    const float *srcc = src.data() + (size_t)sc * src_frames + offset_frames;
+    std::copy(srcc, srcc + n, out.data() + (size_t)c * dst_len);
+  }
+}
+
+GenRunner::BufferGeom GenRunner::buffer_geometry(const InputSpec &spec,
+                                                 int fallback_sr) {
+  BufferGeom g;
+  const auto &sh = spec.shape;
+  g.ch = sh.size() >= 2 ? sh[sh.size() - 2] : 1;
+  g.len = sh.size() >= 1 ? sh[sh.size() - 1] : 0;
+  g.sr = spec.sample_rate > 0 ? spec.sample_rate : fallback_sr;
+  if (g.sr <= 0)
+    g.sr = 44100;
+  return g;
+}
+
+void GenRunner::prepare_buffer_input(const InputSpec &spec, int fallback_sr,
+                                     const std::vector<float> &src, int src_ch,
+                                     size_t src_frames, double src_sr,
+                                     double offset_ms, std::vector<float> &out) {
+  const BufferGeom g = buffer_geometry(spec, fallback_sr);
+  const float pad = (float)spec.pad_value;
+  offset_ms = std::max(0.0, offset_ms);
+  if (!spec.resample) {
+    // Control curve: the ms offset is converted at the DECLARED rate, since the
+    // buffer~'s own rate is ignored in this mode.
+    const size_t off = (size_t)std::llround(offset_ms * 0.001 * g.sr);
+    copy_buffer_asis(src, src_ch, src_frames, g.ch, (size_t)g.len, out, off,
+                     pad);
+  } else {
+    // Audio: the offset is in the source's own frames (0.0.4 behaviour).
+    const double off = offset_ms * 0.001 * src_sr;
+    prepare_init_audio(src, src_ch, src_frames, src_sr, g.ch, (size_t)g.len,
+                       (double)g.sr, out, off, pad);
   }
 }
 
@@ -161,9 +217,17 @@ int GenRunner::generate(const std::string &method,
       double lo = spec.min, hi = spec.max;
       if (hi > lo)
         raw = std::min(std::max(raw, lo), hi);
-      float *f = reinterpret_cast<float *>(dst);
-      for (size_t k = 0; k < n; k++)
-        f[k] = (float)raw;
+      if (spec.dtype == ScalarType::Long) {
+        // int64 attribute: round to the integer the model expects (same as the
+        // live path in Backend::perform).
+        int64_t *l = reinterpret_cast<int64_t *>(dst);
+        for (size_t k = 0; k < n; k++)
+          l[k] = (int64_t)std::llround(raw);
+      } else {
+        float *f = reinterpret_cast<float *>(dst);
+        for (size_t k = 0; k < n; k++)
+          f[k] = (float)raw;
+      }
       break;
     }
     case Role::Noise: {
@@ -177,10 +241,12 @@ int GenRunner::generate(const std::string &method,
       break;
     }
     case Role::Buffer: {
-      // No init waveform was supplied: feed silence. With the model's strength
-      // attribute (e.g. init_noise_level) at its max this reduces to pure
-      // text-to-audio; otherwise the host is expected to supply via bind_init_audio.
-      std::memset(dst, 0, n * sizeof(float));
+      // No buffer was supplied: fill with the input's pad_value (0 => silence).
+      // With the model's strength attribute (e.g. init_noise_level) at its max
+      // this reduces to pure text-to-audio; otherwise the host is expected to
+      // supply it via bind_buffers.
+      float *f = reinterpret_cast<float *>(dst);
+      std::fill(f, f + n, (float)spec.pad_value);
       break;
     }
     case Role::Condition:

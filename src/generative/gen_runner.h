@@ -23,7 +23,8 @@ public:
 
   // Run `method`. For each declared input: if `supplied` has an entry under its
   // name, validate dtype/numel and copy it; else fill by role — Noise => seeded
-  // N(0,1), Attribute => clamp(attr_values[name] if given else default, min, max).
+  // N(0,1), Attribute => clamp(attr_values[name] if given else default, min, max)
+  // (rounded to int64 for an int64 attribute), Buffer => its pad_value.
   // A Condition role that is not supplied is an error. On success (0) `out_audio`
   // holds channel-major floats (channels * length).
   int generate(const std::string &method,
@@ -42,17 +43,19 @@ public:
                  const std::map<std::string, std::vector<char>> &cond,
                  std::map<std::string, SuppliedInput> &supplied);
 
-  // Bind a host-preprocessed init waveform onto a model's buffer-role inputs
-  // by name (parallel to bind_condition). `init` is a channel-major float buffer
-  // already at the input's target geometry (see prepare_init_audio); it must
-  // outlive the generate() call. No-op if `init` is empty (=> generate fills the
-  // buffer input with silence).
-  static void bind_init_audio(const std::vector<InputSpec> &inputs,
-                              const std::vector<float> &init,
-                              std::map<std::string, SuppliedInput> &supplied);
+  // Bind host-preprocessed buffers onto the model's buffer-role inputs by name
+  // (parallel to bind_condition / bind_noise). `buffers` maps an input's name to
+  // a channel-major float buffer already at that input's geometry (see
+  // prepare_buffer_input); each must outlive the generate() call. A buffer input
+  // with no (or an empty) entry is left unsupplied => generate() fills it with
+  // the input's pad_value.
+  static void
+  bind_buffers(const std::vector<InputSpec> &inputs,
+               const std::map<std::string, std::vector<float>> &buffers,
+               std::map<std::string, SuppliedInput> &supplied);
 
   // Bind host-supplied noise tensors onto matching noise-role inputs by name
-  // (parallel to bind_condition / bind_init_audio). `noise` maps an input's name
+  // (parallel to bind_condition / bind_buffers). `noise` maps an input's name
   // to its float32 values (already at the input's numel; e.g. snapshotted from a
   // Jitter matrix by neural.gen~). Only entries whose name matches a Noise-role
   // input are bound; the rest of the noise inputs stay seeded inside generate().
@@ -71,12 +74,40 @@ public:
   // zero-padded, longer is cropped. `src_offset_frames` shifts where the read
   // starts in the source (in source frames): the window becomes
   // [src_offset_frames, src_offset_frames + dst_len·ratio); a window running past
-  // the source end simply yields the existing zero pad.
+  // the source end simply yields the pad (`pad_value`, default 0).
   static void prepare_init_audio(const std::vector<float> &src, int src_ch,
                                  size_t src_frames, double src_sr, int dst_ch,
                                  size_t dst_len, double dst_sr,
                                  std::vector<float> &out,
-                                 double src_offset_frames = 0.0);
+                                 double src_offset_frames = 0.0,
+                                 float pad_value = 0.0f);
+
+  // The no-resample counterpart (a buffer input with "resample": false, e.g. a
+  // control curve): copy `dst_len` frames per channel 1:1 starting at
+  // `offset_frames`, with prepare_init_audio's channel map; frames past the
+  // source end are `pad_value`, a longer source is cropped.
+  static void copy_buffer_asis(const std::vector<float> &src, int src_ch,
+                               size_t src_frames, int dst_ch, size_t dst_len,
+                               std::vector<float> &out, size_t offset_frames,
+                               float pad_value);
+
+  // A buffer input's target geometry: channels/length from shape [.., C, L],
+  // sample rate from its metadata sample_rate, else `fallback_sr` (the output's),
+  // else 44100.
+  struct BufferGeom {
+    int ch, len, sr;
+  };
+  static BufferGeom buffer_geometry(const InputSpec &spec, int fallback_sr);
+
+  // Read one buffer input from source audio by its metadata: resampled
+  // (prepare_init_audio, `offset_ms` at the source rate) or, with
+  // "resample": false, copied 1:1 (copy_buffer_asis, `offset_ms` at the
+  // declared rate). Pads with the input's pad_value. Shared by neural.gen~ and
+  // gen_cli so the policy lives in one place.
+  static void prepare_buffer_input(const InputSpec &spec, int fallback_sr,
+                                   const std::vector<float> &src, int src_ch,
+                                   size_t src_frames, double src_sr,
+                                   double offset_ms, std::vector<float> &out);
 
   // Facade over the owned Backend so callers never reach through to it: method
   // listing, typed input/output descriptors.

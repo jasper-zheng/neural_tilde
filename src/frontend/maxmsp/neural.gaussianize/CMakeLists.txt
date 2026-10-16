@@ -21,7 +21,7 @@ include_directories(
 
 set(SOURCE_FILES neural.gaussianize.cpp)
 
-set(VERSION "0.0.4")
+set(VERSION "0.0.5")
 add_definitions(-DVERSION="${VERSION}")
 
 add_library(

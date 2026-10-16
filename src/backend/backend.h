@@ -31,7 +31,8 @@
 //               stream each generate(); live seeds one persistent stream per
 //               input at load/reset, then advances it per block (still evolves).
 //               A host MAY instead drive a noise input from a Jitter matrix.
-//   Buffer    — (gen only) an init waveform read from a Max buffer~ (resampled).
+//   Buffer    — (gen only) an init waveform read from a Max buffer~ (resampled,
+//               or copied 1:1 when the metadata says "resample": false).
 enum class Role { Signal, Condition, Attribute, Noise, Buffer };
 
 // One declared input of a method's positional forward signature.
@@ -47,6 +48,12 @@ struct InputSpec {
   // (0 => fall back to the output's sample_rate). channels/length come from
   // `shape`.
   int sample_rate = 0;
+  // Buffer-only (gen): `resample` false => copy the buffer~ 1:1 at the declared
+  // geometry, ignoring its sample rate (control curves, e.g. a 50 Hz F0); true
+  // (default) => linear resample as audio. `pad_value` fills past the source end
+  // (and an unsupplied buffer input). Both optional; defaults = 0.0.4 behaviour.
+  bool resample = true;
+  double pad_value = 0.0;
   // Signal-only (live): channel count + temporal compression ratio.
   int channels = 0, ratio = 1;
   // Signal-only (live): per-channel inlet labels (optional; auto-generated when

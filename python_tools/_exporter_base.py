@@ -70,7 +70,8 @@ class _ExporterBase(torch.nn.Module):
         the user sets it. ``dtype`` defaults to being inferred from ``default``'s Python
         type (``bool``/``int`` → ``int64``, ``float`` → ``float32``); pass it explicitly
         to override. The default value is always serialized as a JSON number — the C++
-        host reads it as a double regardless of dtype.
+        host reads it as a double regardless of dtype, and rounds it to an integer for an
+        ``int64`` attribute (``neural.gen~`` shows such an attribute as a Max ``int``).
 
         Args:
             attribute_name: name of the attribute (= the Max attribute name)

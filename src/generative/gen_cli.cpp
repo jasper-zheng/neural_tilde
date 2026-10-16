@@ -5,25 +5,41 @@
 // neural.gen~), so the prompt->audio orchestration lives here directly.
 //
 //   gen_cli <model.pte> [--prompt P] [--neg N] [--attr NAME VALUE]... [--seed N]
-//                       [--init init.wav] [--strength S] [--noise NAME FILE]...
-//                       [--method forward] [--out out.wav]
+//                       [--init [NAME=]init.wav]... [--init-offset [NAME=]MS]...
+//                       [--strength S] [--noise NAME FILE]... [--cond-json FILE]
+//                       [--method forward] [--out out.wav] [--out-raw out.f32]
 //
 // --noise NAME FILE overrides a noise input by name with raw little-endian
 // float32 from FILE (numel must match the input) instead of seeding it — the
 // headless analogue of neural.gen~'s jit_matrix noise inlet.
 //
 // --init/--strength drive an audio-to-audio model (a buffer-role input):
-// the init WAV is resampled/channel-mapped/cropped to the input geometry, and
-// --strength is shorthand for --attr init_noise_level S.
+// the init WAV is read into the input by its metadata (resampled, or copied 1:1
+// with "resample": false; channel-mapped; cropped/padded with pad_value), and
+// --strength is shorthand for --attr init_noise_level S. `--init NAME=FILE`
+// targets the buffer input NAME (several per method); a bare `--init FILE` goes
+// to the first one. `--init-offset [NAME=]MS` starts the read MS into the source
+// (the analogue of neural.gen~'s `init [input] <buffer> [ms]`).
+//
+// --cond-json FILE supplies condition inputs from a JSON object, keys matched to
+// condition names (other keys ignored), converted to each input's dtype like
+// neural.gen~'s dictionary path; a scalar value is a 1-element list. When every
+// condition comes from the JSON, no tokenizer is needed.
+//
+// --out-raw FILE also writes the output as raw channel-major float32 (exact; the
+// WAV is PCM16 and clipped to [-1, 1]).
 //
 // --neg sets the negative prompt for a CFG model (extra condition inputs such as
 // neg_input_ids/neg_attention_mask). Any condition the positive prompt doesn't
 // fill is supplied from --neg, matched by dtype; an empty --neg is unconditional.
 
+#include "../backend/json.hpp"
 #include "../tokenizer/tokenizer.h"
 #include "../tokenizer/tokenizer_config.h"
 #include "gen_runner.h"
 #include "wav.h"
+// After gen_runner.h: needs executorch's ScalarType in scope.
+#include "../frontend/maxmsp/shared/cond_bytes.h" // cond_atoms_to_bytes
 
 #include <algorithm>
 #include <cmath>
@@ -44,13 +60,22 @@ static std::string config_path_for(const std::string &pte_path) {
   return stem + ".tokenizer.config.json";
 }
 
+// Split "NAME=VALUE" into (NAME, VALUE); without '=' NAME is empty.
+static std::pair<std::string, std::string> split_named(const std::string &a) {
+  size_t eq = a.find('=');
+  if (eq == std::string::npos)
+    return {"", a};
+  return {a.substr(0, eq), a.substr(eq + 1)};
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::fprintf(stderr,
                  "usage: %s <model.pte> [--prompt P] [--neg N] "
-                 "[--attr NAME VALUE]... [--seed N] [--init init.wav] "
-                 "[--strength S] [--noise NAME FILE]... [--method M] "
-                 "[--out out.wav]\n",
+                 "[--attr NAME VALUE]... [--seed N] [--init [NAME=]init.wav]... "
+                 "[--init-offset [NAME=]MS]... [--strength S] "
+                 "[--noise NAME FILE]... [--cond-json FILE] [--method M] "
+                 "[--out out.wav] [--out-raw out.f32]\n",
                  argv[0]);
     return 2;
   }
@@ -59,7 +84,12 @@ int main(int argc, char **argv) {
   std::string neg_prompt; // negative prompt for CFG models (empty => unconditional)
   std::string method = "forward";
   std::string out = "out.wav";
-  std::string init_wav; // audio-to-audio init clip (buffer role); optional
+  std::string out_raw; // optional exact float32 dump of the output
+  // Buffer-input sources: input name ("" => the first buffer input) -> WAV path,
+  // and per-input read offsets in ms (same keying).
+  std::map<std::string, std::string> init_wavs;
+  std::map<std::string, double> init_offsets_ms;
+  std::string cond_json; // optional JSON object of condition values by name
   unsigned long long seed = 0;
   // Generic model-attribute overrides by name (e.g. seconds_total, cfg_scale);
   // GenRunner fills any unspecified attribute from its metadata default.
@@ -91,8 +121,16 @@ int main(int argc, char **argv) {
     } else if (a == "--noise") {
       std::string name = next("--noise name");
       noise_paths[name] = next("--noise file");
-    } else if (a == "--init")
-      init_wav = next("--init");
+    } else if (a == "--init") {
+      auto nv = split_named(next("--init"));
+      init_wavs[nv.first] = nv.second;
+    } else if (a == "--init-offset") {
+      auto nv = split_named(next("--init-offset"));
+      init_offsets_ms[nv.first] = std::atof(nv.second.c_str());
+    } else if (a == "--cond-json")
+      cond_json = next("--cond-json");
+    else if (a == "--out-raw")
+      out_raw = next("--out-raw");
     else if (a == "--strength")
       // Convenience alias for the audio-to-audio strength attribute.
       attr_values["init_noise_level"] = std::atof(next("--strength").c_str());
@@ -140,17 +178,50 @@ int main(int argc, char **argv) {
   // tokenizer config) so bind_condition matches them by name. The cond byte
   // buffers must outlive runner.generate() (the supplied entries reference them).
   const auto &inputs = runner.gen_inputs(method);
+  std::map<std::string, std::vector<char>> cond; // input name -> raw dtype bytes
+  std::map<std::string, SuppliedInput> supplied;
+
+  // Conditions from a JSON object (the headless analogue of neural.gen~'s
+  // dictionary inlet): keys matched to condition names, other keys ignored.
+  if (!cond_json.empty()) {
+    nlohmann::json j;
+    try {
+      std::ifstream f(cond_json);
+      f >> j;
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "FAIL: could not parse %s: %s\n", cond_json.c_str(),
+                   e.what());
+      return 1;
+    }
+    if (!j.is_object()) {
+      std::fprintf(stderr, "FAIL: %s is not a JSON object\n", cond_json.c_str());
+      return 1;
+    }
+    for (const auto &in : inputs) {
+      if (in.role != Role::Condition || !j.contains(in.name))
+        continue;
+      nlohmann::json v = j[in.name];
+      if (!v.is_array())
+        v = nlohmann::json::array({v}); // a scalar is a 1-element list
+      cond[in.name] = cond_atoms_to_bytes(
+          in.dtype, (long)v.size(),
+          [&](long k) { return v[k].get<long long>(); },
+          [&](long k) { return v[k].get<double>(); });
+      std::printf("cond:     %s = %zu value(s) from %s\n", in.name.c_str(),
+                  v.size(), cond_json.c_str());
+    }
+  }
+
+  // The tokenizer is needed only for conditions the JSON did not supply.
   bool needs_tokens = false;
   for (const auto &in : inputs)
-    if (in.role == Role::Condition)
+    if (in.role == Role::Condition && !cond.count(in.name))
       needs_tokens = true;
 
   std::vector<int64_t> ids;
   std::vector<int32_t> mask;
   std::vector<int64_t> neg_ids;
   std::vector<int32_t> neg_mask;
-  std::map<std::string, std::vector<char>> cond; // input name -> raw dtype bytes
-  std::map<std::string, SuppliedInput> supplied;
   if (needs_tokens) {
     if (!have_cfg || !tok.loaded()) {
       std::fprintf(stderr, "FAIL: model needs a tokenizer but no "
@@ -164,8 +235,10 @@ int main(int argc, char **argv) {
       std::fprintf(stderr, "FAIL: tokenization failed\n");
       return 1;
     }
+    // Never overwrite a condition the JSON already supplied.
     auto put = [&](const std::string &key, const void *p, size_t bytes) {
-      cond[key].assign((const char *)p, (const char *)p + bytes);
+      if (!cond.count(key))
+        cond[key].assign((const char *)p, (const char *)p + bytes);
     };
     put(cfg.ids_key, ids.data(), ids.size() * sizeof(int64_t));
     put(cfg.mask_key, mask.data(), mask.size() * sizeof(int32_t));
@@ -200,45 +273,71 @@ int main(int argc, char **argv) {
       }
     }
 
-    GenRunner::bind_condition(inputs, cond, supplied);
   }
+  GenRunner::bind_condition(inputs, cond, supplied);
 
-  // Audio-to-audio: if the model has a buffer-role input and --init was given,
-  // read the WAV, resample/channel-map/crop-pad it to the input geometry, and
-  // bind it. init_audio_buf must outlive runner.generate() (same lifetime rule
-  // as ids/mask). Without --init the input is fed silence (see GenRunner).
-  std::vector<float> init_audio_buf;
-  const InputSpec *ai = nullptr;
-  for (const auto &in : inputs)
-    if (in.role == Role::Buffer)
-      ai = &in;
-  if (!init_wav.empty()) {
-    if (!ai) {
-      std::fprintf(stderr,
-                   "warning: --init given but model has no buffer input\n");
-    } else {
+  // Buffer inputs: each --init WAV is read into its buffer input by the input's
+  // metadata (GenRunner::prepare_buffer_input: resample or 1:1, channel map,
+  // crop/pad). The buffers must outlive runner.generate() (same lifetime rule as
+  // ids/mask). A buffer input without --init is filled with its pad_value.
+  std::map<std::string, std::vector<float>> buffers;
+  {
+    std::vector<const InputSpec *> buf_inputs;
+    for (const auto &in : inputs)
+      if (in.role == Role::Buffer)
+        buf_inputs.push_back(&in);
+    const int fallback_sr = runner.output_spec(method).sample_rate;
+    for (const auto &kv : init_wavs) {
+      const InputSpec *bi = nullptr;
+      if (kv.first.empty()) {
+        if (!buf_inputs.empty())
+          bi = buf_inputs.front();
+        if (buf_inputs.size() > 1)
+          std::fprintf(stderr, "warning: model has %zu buffer inputs, bare --init "
+                               "goes to the first (\"%s\"); use --init NAME=FILE\n",
+                       buf_inputs.size(), bi->name.c_str());
+      } else {
+        for (const auto *b : buf_inputs)
+          if (b->name == kv.first)
+            bi = b;
+      }
+      if (!bi) {
+        std::fprintf(stderr, "warning: --init %s%s ignored: no such buffer input\n",
+                     kv.first.empty() ? "" : (kv.first + "=").c_str(),
+                     kv.second.c_str());
+        continue;
+      }
       std::vector<float> src;
       int sc = 0, sf = 0, ssr = 0;
-      if (!read_wav(init_wav, src, sc, sf, ssr)) {
+      if (!read_wav(kv.second, src, sc, sf, ssr)) {
         std::fprintf(stderr, "FAIL: could not read init WAV %s\n",
-                     init_wav.c_str());
+                     kv.second.c_str());
         return 1;
       }
-      // Target geometry from the buffer input: [.., C, L]; sr from its
-      // metadata sample_rate, else the output's.
-      const auto &sh = ai->shape;
-      int dch = sh.size() >= 2 ? sh[sh.size() - 2] : 1;
-      int dlen = sh.size() >= 1 ? sh[sh.size() - 1] : 0;
-      int dsr = ai->sample_rate > 0 ? ai->sample_rate
-                                    : runner.output_spec(method).sample_rate;
-      if (dsr <= 0)
-        dsr = 44100;
-      std::printf("init:     %s  (%d ch x %d @ %d Hz -> %d ch x %d @ %d Hz)\n",
-                  init_wav.c_str(), sc, sf, ssr, dch, dlen, dsr);
-      GenRunner::prepare_init_audio(src, sc, (size_t)sf, (double)ssr, dch,
-                                    (size_t)dlen, (double)dsr, init_audio_buf);
-      GenRunner::bind_init_audio(inputs, init_audio_buf, supplied);
+      double off_ms = 0.0;
+      auto ot = init_offsets_ms.find(kv.first);
+      if (ot == init_offsets_ms.end())
+        ot = init_offsets_ms.find(bi->name);
+      if (ot != init_offsets_ms.end())
+        off_ms = ot->second;
+      const auto g = GenRunner::buffer_geometry(*bi, fallback_sr);
+      std::printf("init:     %s <- %s  (%d ch x %d @ %d Hz -> %d ch x %d @ %d Hz%s, "
+                  "offset %g ms)\n",
+                  bi->name.c_str(), kv.second.c_str(), sc, sf, ssr, g.ch, g.len,
+                  g.sr, bi->resample ? "" : ", 1:1", off_ms);
+      if (!bi->resample && ssr != g.sr)
+        std::fprintf(stderr, "warning: \"%s\" is read 1:1; the WAV's sample rate "
+                             "%d Hz is ignored (declared %d Hz)\n",
+                     bi->name.c_str(), ssr, g.sr);
+      GenRunner::prepare_buffer_input(*bi, fallback_sr, src, sc, (size_t)sf,
+                                      (double)ssr, off_ms, buffers[bi->name]);
     }
+    for (const auto *b : buf_inputs)
+      if (!buffers.count(b->name))
+        std::fprintf(stderr, "warning: buffer input \"%s\" not supplied, filling "
+                             "with %g\n",
+                     b->name.c_str(), b->pad_value);
+    GenRunner::bind_buffers(inputs, buffers, supplied);
   }
 
   // Noise overrides: read each --noise FILE as raw float32 and bind it by name
@@ -300,6 +399,17 @@ int main(int argc, char **argv) {
   if (nonfinite) {
     std::fprintf(stderr, "FAIL: non-finite output\n");
     return 1;
+  }
+
+  if (!out_raw.empty()) {
+    std::ofstream f(out_raw, std::ios::binary);
+    f.write(reinterpret_cast<const char *>(audio.data()),
+            (std::streamsize)(audio.size() * sizeof(float)));
+    if (!f) {
+      std::fprintf(stderr, "FAIL: could not write %s\n", out_raw.c_str());
+      return 1;
+    }
+    std::printf("wrote %s\n", out_raw.c_str());
   }
 
   if (!write_wav(out, audio, channels, length, sr)) {

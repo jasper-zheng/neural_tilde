@@ -44,7 +44,8 @@ from ._lowering import (_executorch_version, _make_partitioner,
 #   condition  — externally supplied (tokens/masks), matched by name
 #   attribute  — scalar [1] control the host exposes as a Max attribute
 #   noise      — host fills with seeded N(0,1)
-#   buffer     — host-supplied init waveform read from a Max buffer~ (resampled/cropped to spec)
+#   buffer     — host-supplied data read from a Max buffer~ (resampled/cropped to spec, or
+#                copied 1:1 with resample=False for control curves)
 # Each method's output is always a single audio tensor (role "buffer").
 # All audio tensors (the "buffer"-role input and output) are channel-major [1, C, L].
 # register_condition / register_attribute / register_noise come from _ExporterBase.
@@ -79,19 +80,49 @@ class GenModule(_ExporterBase):
                               length: int,
                               sample_rate: int = 44100,
                               description: str = "",
-                              dtype: str = "float32") -> None:
-        """Register a host-supplied init waveform read from a Max ``buffer~``
+                              dtype: str = "float32",
+                              resample: bool = True,
+                              pad_value: float = 0.0) -> None:
+        """Register a host-supplied input read from a Max ``buffer~``
         (channel-major ``[1, channels, length]``).
 
-        The host reads a ``buffer~``, resamples to ``sample_rate``, maps to ``channels`` and
-        crops/pads to ``length`` before feeding (audio-to-audio variation).
+        By default the host treats the ``buffer~`` as audio: it resamples it from its own
+        rate to ``sample_rate``, maps it to ``channels`` and crops/pads it to ``length``
+        (audio-to-audio variation). A method may take several buffer inputs; in Max each
+        gets its source with ``init <name> <buffer> [ms]``.
+
+        For a **control curve** (e.g. a 50 Hz F0 contour in MIDI pitch, 0 = unvoiced),
+        declare its rate and pass ``resample=False``: the host then copies ``length``
+        samples per channel 1:1, ignoring the ``buffer~``'s sample rate (a user-made
+        buffer usually sits at the patch rate), and linear interpolation never smears
+        voiced/unvoiced edges. The ``init`` offset in ms is then converted at
+        ``sample_rate``. Example::
+
+            gm.register_buffer_input("f0", channels=1, length=1003, sample_rate=50,
+                                     resample=False)
 
         (The method is ``register_buffer_input`` rather than ``register_buffer`` to avoid
-        shadowing ``torch.nn.Module.register_buffer``.)"""
+        shadowing ``torch.nn.Module.register_buffer``.)
+
+        Args:
+            name: input name (= the name used by ``init <name> <buffer>``)
+            channels, length: the input geometry
+            sample_rate: the rate the model expects the data at
+            description: optional human-readable description
+            dtype: ``"float32"``
+            resample: ``True`` (default) resamples the ``buffer~`` as audio; ``False``
+                copies it sample for sample (written to the metadata only when False)
+            pad_value: fills past the end of the source, and the whole input when no
+                ``buffer~`` is given (written only when it differs from 0.0)
+        """
         spec = {"name": name, "role": "buffer",
                 "shape": [1, int(channels), int(length)], "dtype": dtype,
                 "channels": int(channels), "length": int(length),
                 "sample_rate": int(sample_rate)}
+        if not resample:
+            spec["resample"] = False
+        if float(pad_value) != 0.0:
+            spec["pad_value"] = float(pad_value)
         if description:
             spec["description"] = description
         self._buffer_specs[name] = spec

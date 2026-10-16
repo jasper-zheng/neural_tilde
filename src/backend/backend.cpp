@@ -163,6 +163,8 @@ bool Backend::load_metadata(const std::string &pte_path) {
       spec.def = in.value("default", 0.0);
       spec.description = in.value("description", std::string());
       spec.sample_rate = in.value("sample_rate", 0);
+      spec.resample = in.value("resample", true);
+      spec.pad_value = in.value("pad_value", 0.0);
       spec.channels = in.value("channels", 0);
       spec.ratio = in.value("ratio", 1);
       if (in.contains("labels"))
