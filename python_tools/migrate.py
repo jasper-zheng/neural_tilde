@@ -99,8 +99,9 @@ from torch._export.converter import TS2EPConverter
 from torch.export.graph_signature import (ExportGraphSignature, InputKind,
                                           OutputKind, OutputSpec, TensorArgument)
 
-from ._lowering import (_executorch_version, _make_init_mutable_passes,
-                        _make_partitioner)
+from ._lowering import (_aoti_graph_transforms, _aoti_prepare,
+                        _executorch_version, _make_init_mutable_passes,
+                        _make_partitioners)
 from .live_module import LiveModule
 
 # Methods a RAVE .ts may expose, in nn~ convention (probed via <method>_params).
@@ -761,6 +762,9 @@ def migrate(ts_path: str, out: str, delegate: str = "coreml",
 
     cfg = EdgeCompileConfig(_check_ir_validity=False,
                             _core_aten_ops_exception_list=list(_RNG_OPS))
+    # AOTInductor delegates: env setup once, per-method transforms on each lowering's copy.
+    _aoti_prepare(delegate)
+    aoti_transforms = _aoti_graph_transforms(delegate)
 
     def _lower(graphs: dict):
         # Migrated RAVE methods can partition differently under CoreML (decode's FFT noise
@@ -771,12 +775,16 @@ def migrate(ts_path: str, out: str, delegate: str = "coreml",
         # Lower a deep copy: to_edge_transform_and_lower consumes the EP, but we may need to
         # re-lower a method (trial then final), so keep the originals in method_graphs pristine.
         buffers = [fqn for name in graphs for fqn in primed[name]]
+        graphs = copy.deepcopy(graphs)
+        for name in graphs:
+            for transform in aoti_transforms:
+                graphs[name] = transform(graphs[name])
         with torch.no_grad():
             return to_edge_transform_and_lower(
-                copy.deepcopy(graphs),
+                graphs,
                 transform_passes=_make_init_mutable_passes(buffers),
-                partitioner=_make_partitioner(
-                    delegate, coreml_disable_weight_sharing=True,
+                partitioner=_make_partitioners(
+                    delegate, graphs, coreml_disable_weight_sharing=True,
                     coreml_compute_units=compute_units),
                 compile_config=cfg).to_executorch()
 

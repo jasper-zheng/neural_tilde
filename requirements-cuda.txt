@@ -1,0 +1,9 @@
+# Export environment for Windows x64 + NVIDIA CUDA models (ExecuTorch 1.5 track).
+# Install torch from the CUDA 13.0 index FIRST, so executorch doesn't pull a CPU build:
+#   pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cu130
+#   pip install -r requirements-cuda.txt
+# Run exports from a "Developer PowerShell for VS 2022" (cl.exe must be on PATH). See Build.md.
+torch==2.14.0
+executorch==1.5.1
+triton-windows~=3.8.0
+cached_conv>=2.5.0

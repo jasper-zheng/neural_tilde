@@ -3,7 +3,10 @@
 
 Build the externals from source if you want to modify it.
 
-**Apple Silicon (arm64), macOS 15+ only** for now.
+- **macOS (Apple Silicon, arm64), macOS 15+:** ExecuTorch 1.3.1, see below.
+- **Windows x64 + NVIDIA CUDA:** ExecuTorch 1.5, in progress. See [Windows (CUDA)](#windows-cuda) for the runtime and the export environment.
+
+## macOS
 
 **Prerequisites:** 
  - **Xcode Command Line Tools** (to install: `xcode-select --install`), 
@@ -73,3 +76,48 @@ rsync -a --delete src/externals/ externals/
 codesign --force --deep -s - externals/*.mxo
 ```
 
+
+## Windows (CUDA)
+
+**Windows 10/11 x64** with an NVIDIA GPU. The Max externals build for Windows is not wired up yet. This section covers the ExecuTorch runtime it links against and the Python environment for exporting CUDA models.
+
+**Prerequisites:**
+ - **Visual Studio 2022** with the "Desktop development with C++" workload (MSVC; ClangCL is not needed). Run every command below in a **Developer PowerShell for VS 2022**, so `cl.exe` and `ninja` are on `PATH`.
+ - **CUDA Toolkit 13.0** and an NVIDIA driver ≥ 580.
+ - **CMake** ≥ 3.24, **git**, and Python 3.12 (e.g. miniconda).
+ - Windows long paths enabled (admin PowerShell: `Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem LongPathsEnabled 1`) and `git config --global core.longpaths true`.
+
+### 1. Python export environment
+
+```powershell
+conda create -n nt-cuda python=3.12 -y
+conda activate nt-cuda
+pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cu130   # first: CUDA build of torch
+pip install -r requirements-cuda.txt
+pip install -e . --no-deps
+```
+
+Exporting a CUDA model also needs a CUDA GPU on the export machine. Inductor compiles and autotunes the Triton kernels on it.
+
+### 2. Build the ExecuTorch 1.5 runtime (once)
+
+Clone into a short path (the directory must be named exactly `executorch`), then configure with the active `nt-cuda` Python:
+
+```powershell
+git clone -b v1.5.1 --recursive https://github.com/pytorch/executorch.git C:\dev\executorch
+cmake -S C:\dev\executorch -B C:\dev\executorch\cmake-out -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=C:/dev/executorch/cmake-out `
+  -DCMAKE_CXX_STANDARD=20 `
+  -DFLATC_EXECUTABLE="$env:CONDA_PREFIX\Lib\site-packages\executorch\data\bin\flatc.exe" `
+  -DPYTHON_EXECUTABLE="$env:CONDA_PREFIX\python.exe" `
+  -DEXECUTORCH_BUILD_EXTENSION_MODULE=ON -DEXECUTORCH_BUILD_EXTENSION_TENSOR=ON `
+  -DEXECUTORCH_BUILD_EXTENSION_DATA_LOADER=ON -DEXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR=ON `
+  -DEXECUTORCH_BUILD_EXTENSION_NAMED_DATA_MAP=ON -DEXECUTORCH_BUILD_KERNELS_OPTIMIZED=ON `
+  -DEXECUTORCH_BUILD_XNNPACK=ON -DEXECUTORCH_BUILD_CUDA=ON `
+  -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90;120"
+cmake --build C:\dev\executorch\cmake-out --target install -j 10
+```
+
+ - `-DCMAKE_CXX_STANDARD=20`: the optimized CPU kernels include torch 2.14 headers that need C++20 under MSVC.
+ - `-DFLATC_EXECUTABLE`: with Ninja, ExecuTorch's own flatc sub-build can't be found (`flatc.exe ... missing and no known rule to make it`). The `flatc.exe` shipped in the executorch wheel matches the release.
+ - The CUDA backend is installed as static libraries plus two DLLs, `lib/aoti_cuda_shims.dll` and `bin/extension_cuda.dll`. Those two ship beside the externals. No CUDA runtime DLL is needed at run time; the NVIDIA driver provides the rest.

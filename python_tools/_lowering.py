@@ -11,7 +11,14 @@ from typing import Optional
 def _executorch_version() -> str:
     try:
         import executorch
-        return getattr(executorch, "__version__", "unknown")
+        if hasattr(executorch, "__version__"):
+            return executorch.__version__
+    except Exception:
+        pass
+    # ET >= 1.5 has no ``executorch.__version__``: use the installed distribution's version.
+    try:
+        from importlib.metadata import version
+        return version("executorch")
     except Exception:
         return "unknown"
 
@@ -50,10 +57,11 @@ def _make_partitioner(delegate: str, coreml_disable_weight_sharing: bool = False
                       method_name: Optional[str] = None):
     """Return the partitioner list for ``to_edge_transform_and_lower``.
 
-    ``method_name`` (Metal only) names the method this partitioner is built for — the Metal
-    (AOTInductor) backend compiles one ``.so`` per method and keys the embedded blob on it
+    ``method_name`` (AOTInductor delegates only) names the method this partitioner is built
+    for — an AOTI backend compiles one ``.so`` per method and keys the embedded blob on it
     (``<method>_so_blob``), so multi-method exports must build one partitioner per method via
-    a ``{name: [...]}`` partitioner dict. Ignored by the other delegates.
+    a ``{name: [...]}`` partitioner dict (see :func:`_make_partitioners`). Ignored by the other
+    delegates.
 
     ``coreml_disable_weight_sharing`` (CoreML only) sets the multimethod weight-sharing
     strategy to DISABLED so methods are lowered independently. The default POSITIONAL
@@ -139,6 +147,44 @@ def _make_partitioner(delegate: str, coreml_disable_weight_sharing: bool = False
             CompileSpec("codesign_identity", b"-")])]  # ad-hoc sign the embedded .so
     raise ValueError(f"unknown delegate '{delegate}' "
                      "(expected 'xnnpack', 'coreml', 'mlx', 'mps', 'metal', or 'portable')")
+
+
+# ------------------------------------------------------------------- AOTInductor delegates
+# Delegates that compile each method as one whole graph with AOTInductor. They differ from
+# the op-handler backends in three ways the exporters must honour: one partitioner per method
+# (keyed on its method-name compile spec), extra per-method graph transforms before lowering,
+# and a one-time environment setup for the AOTI compile/link step.
+
+_AOTI_DELEGATES = ("metal",)
+
+
+def _is_aoti_delegate(delegate: str) -> bool:
+    return delegate in _AOTI_DELEGATES
+
+
+def _make_partitioners(delegate: str, method_names, **kwargs):
+    """The ``partitioner`` argument for ``to_edge_transform_and_lower``: a ``{method: [...]}``
+    dict for AOTInductor delegates, otherwise one list shared by every method. ``kwargs`` are
+    passed through to :func:`_make_partitioner`."""
+    if _is_aoti_delegate(delegate):
+        return {name: _make_partitioner(delegate, method_name=name, **kwargs)
+                for name in method_names}
+    return _make_partitioner(delegate, **kwargs)
+
+
+def _aoti_graph_transforms(delegate: str) -> list:
+    """Per-method ``ExportedProgram`` transforms the delegate needs before lowering, in order
+    (empty for non-AOTI delegates). Exporters append these after any user transforms."""
+    if delegate == "metal":
+        return _metal_graph_transforms()
+    return []
+
+
+def _aoti_prepare(delegate: str) -> None:
+    """One-time environment setup before lowering for an AOTInductor delegate (no-op
+    otherwise)."""
+    if delegate == "metal":
+        _metal_setup_link_env()
 
 
 # --------------------------------------------------------------------- Metal (AOTInductor)

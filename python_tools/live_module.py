@@ -35,9 +35,9 @@ from typing import List, Optional, Sequence, Union
 import torch
 
 from ._exporter_base import _ExporterBase, _MethodWrapper
-from ._lowering import (_executorch_version, _make_init_mutable_passes,
-                        _make_partitioner, _metal_graph_transforms,
-                        _metal_setup_link_env)
+from ._lowering import (_aoti_graph_transforms, _aoti_prepare,
+                        _executorch_version, _make_init_mutable_passes,
+                        _make_partitioners)
 
 
 class LiveModule(_ExporterBase):
@@ -322,16 +322,13 @@ class LiveModule(_ExporterBase):
                 "export_to_pte requires the 'executorch' package. Install it "
                 "(e.g. `pip install executorch`) or build it from source.") from e
 
-        # Metal compiles one .so per method keyed on its name (per-method partitioner dict)
-        # and needs libomp on the link path; the other delegates share one partitioner.
-        if delegate == "metal":
-            _metal_setup_link_env()
-            partitioner = {name: _make_partitioner("metal", method_name=name)
-                           for name in self._methods}
-        else:
-            partitioner = _make_partitioner(
-                delegate, coreml_compute_units=coreml_compute_units)
-        _metal_transforms = _metal_graph_transforms() if delegate == "metal" else []
+        # AOTInductor delegates (metal) compile one .so per method keyed on its name
+        # (per-method partitioner dict) and need env setup + per-method graph transforms;
+        # the other delegates share one partitioner and need neither.
+        _aoti_prepare(delegate)
+        partitioner = _make_partitioners(
+            delegate, self._methods, coreml_compute_units=coreml_compute_units)
+        aoti_transforms = _aoti_graph_transforms(delegate)
 
         method_graphs = {}
         primed_buffers = []  # FQNs of lazily-allocated streaming buffers (caches)
@@ -350,9 +347,9 @@ class LiveModule(_ExporterBase):
                 primed_buffers += self._prime_streaming_buffers(name, example)
             with torch.no_grad():
                 exported = torch.export.export(wrapper, example, strict=strict)
-            # Metal/AOTI only: const-fold (constant-pow bug) + split/chunk decomposition
-            # (split_copy) per method before lowering; no-op for the other delegates.
-            for transform in _metal_transforms:
+            # AOTI only (e.g. Metal: const-fold + split/chunk decomposition) per method
+            # before lowering; no-op for the other delegates.
+            for transform in aoti_transforms:
                 exported = transform(exported)
             method_graphs[name] = exported
 

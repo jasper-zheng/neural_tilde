@@ -37,8 +37,8 @@ import torch
 from torch.export import ExportedProgram
 
 from ._exporter_base import _ExporterBase, _MethodWrapper
-from ._lowering import (_executorch_version, _make_partitioner,
-                        _metal_graph_transforms, _metal_setup_link_env)
+from ._lowering import (_aoti_graph_transforms, _aoti_prepare,
+                        _executorch_version, _make_partitioners)
 
 # Roles understood by the gen host (see EXECUTORCH_PROTOCOL.md §3 and GenRunner):
 #   condition  — externally supplied (tokens/masks), matched by name
@@ -271,11 +271,10 @@ class GenModule(_ExporterBase):
         transforms = list(graph_transforms)
         if decompose_conv:
             transforms.append(decompose_convolution_nodes)
-        if delegate == "metal":
-            # Metal/AOTI needs const-folding (the constant-pow inductor bug) + split/chunk
-            # decomposition (split_copy) applied per method, and libomp on the link path.
-            _metal_setup_link_env()
-            transforms.extend(_metal_graph_transforms())
+        # AOTInductor delegates need env setup + per-method graph transforms (e.g. Metal:
+        # const-folding for the constant-pow inductor bug, split/chunk decomposition, libomp).
+        _aoti_prepare(delegate)
+        transforms.extend(_aoti_graph_transforms(delegate))
 
         method_graphs = {}
         for name in self._methods:
@@ -287,14 +286,10 @@ class GenModule(_ExporterBase):
                 exported = transform(exported)
             method_graphs[name] = exported
 
-        # Metal compiles one .so per method keyed on its name, so it needs a per-method
-        # partitioner dict; the other delegates share one partitioner across all methods.
-        if delegate == "metal":
-            partitioner = {name: _make_partitioner("metal", method_name=name)
-                           for name in method_graphs}
-        else:
-            partitioner = _make_partitioner(
-                delegate, coreml_compute_units=coreml_compute_units)
+        # AOTInductor delegates compile one .so per method keyed on its name (per-method
+        # partitioner dict); the other delegates share one partitioner across all methods.
+        partitioner = _make_partitioners(
+            delegate, method_graphs, coreml_compute_units=coreml_compute_units)
         lowered = to_edge_transform_and_lower(
             method_graphs,
             partitioner=partitioner,
