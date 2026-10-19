@@ -1,4 +1,5 @@
 #include "tokenizer_config.h"
+#include "nn_platform.h" // nn::fs_path / utf8_string (UTF-8 paths on Windows)
 
 #include "../backend/json.hpp" // nlohmann/json single-header (vendored)
 
@@ -7,14 +8,9 @@
 
 using json = nlohmann::json;
 
-static std::string dir_of(const std::string &path) {
-  auto slash = path.find_last_of("/\\");
-  return slash == std::string::npos ? std::string(".") : path.substr(0, slash);
-}
-
 bool load_tokenizer_config(const std::string &config_path, TokenizerConfig &out,
                            std::string &tokenizer_json_abs) {
-  std::ifstream f(config_path);
+  std::ifstream f(nn::fs_path(config_path));
   if (!f)
     return false;
   std::stringstream ss;
@@ -38,6 +34,8 @@ bool load_tokenizer_config(const std::string &config_path, TokenizerConfig &out,
 
   if (out.tokenizer_file.empty())
     return false;
-  tokenizer_json_abs = dir_of(config_path) + "/" + out.tokenizer_file;
+  // `tokenizer_file` is relative to the config's folder.
+  tokenizer_json_abs = nn::utf8_string(nn::fs_path(config_path).parent_path() /
+                                       nn::fs_path(out.tokenizer_file));
   return true;
 }

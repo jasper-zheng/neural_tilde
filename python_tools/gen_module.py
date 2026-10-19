@@ -37,8 +37,9 @@ import torch
 from torch.export import ExportedProgram
 
 from ._exporter_base import _ExporterBase, _MethodWrapper
-from ._lowering import (_aoti_graph_transforms, _aoti_prepare,
-                        _executorch_version, _make_partitioners)
+from ._lowering import (_aoti_edge_config, _aoti_graph_transforms,
+                        _aoti_lowering, _aoti_metadata, _executorch_version,
+                        _make_partitioners, _write_program)
 
 # Roles understood by the gen host (see EXECUTORCH_PROTOCOL.md §3 and GenRunner):
 #   condition  — externally supplied (tokens/masks), matched by name
@@ -230,10 +231,15 @@ class GenModule(_ExporterBase):
 
         Args:
             path: output path; ``.pte`` is appended if missing.
-            delegate: "mlx" (default), "coreml", "xnnpack", "mps", "metal", or "portable".
-                "metal" (EXPERIMENTAL) whole-graph AOTInductor compile to a Metal .so embedded
-                in the .pte — moves the heavy compile to export time for a fast load; needs the
-                ExecuTorch Metal runtime (EXECUTORCH_BUILD_METAL) + macOS.
+            delegate: "mlx" (default), "coreml", "xnnpack", "mps", "metal", "cuda", or
+                "portable". "metal" (EXPERIMENTAL) whole-graph AOTInductor compile to a Metal
+                .so embedded in the .pte — moves the heavy compile to export time for a fast
+                load; needs the ExecuTorch Metal runtime (EXECUTORCH_BUILD_METAL) + macOS.
+                "cuda" (Windows x64 + NVIDIA) whole-graph AOTInductor compile to Triton kernels
+                in a DLL embedded in the .pte, with the weights in a ``<name>.ptd`` beside it.
+                Exporting needs a CUDA torch, an NVIDIA GPU and, on Windows, a "Developer
+                PowerShell for VS 2022". Kernels target sm_75 (Turing) and newer;
+                ``NN_CUDA_ARCH`` changes that floor.
             graph_transforms: callables applied to each method's ExportedProgram before
                 lowering (e.g. model-specific graph surgery). Applied in order.
             decompose_conv: also apply the built-in ``decompose_convolution_nodes``
@@ -271,9 +277,8 @@ class GenModule(_ExporterBase):
         transforms = list(graph_transforms)
         if decompose_conv:
             transforms.append(decompose_convolution_nodes)
-        # AOTInductor delegates need env setup + per-method graph transforms (e.g. Metal:
-        # const-folding for the constant-pow inductor bug, split/chunk decomposition, libomp).
-        _aoti_prepare(delegate)
+        # AOTInductor delegates need per-method graph transforms (e.g. Metal: const-folding
+        # for the constant-pow inductor bug + split/chunk decomposition; CUDA: conv1d->conv2d).
         transforms.extend(_aoti_graph_transforms(delegate))
 
         method_graphs = {}
@@ -290,15 +295,18 @@ class GenModule(_ExporterBase):
         # partitioner dict); the other delegates share one partitioner across all methods.
         partitioner = _make_partitioners(
             delegate, method_graphs, coreml_compute_units=coreml_compute_units)
-        lowered = to_edge_transform_and_lower(
-            method_graphs,
-            partitioner=partitioner,
-            compile_config=EdgeCompileConfig(_check_ir_validity=False),
-        )
+        edge_config = {"_check_ir_validity": False, **_aoti_edge_config(delegate)}
+        with _aoti_lowering(delegate):
+            lowered = to_edge_transform_and_lower(
+                method_graphs,
+                partitioner=partitioner,
+                compile_config=EdgeCompileConfig(**edge_config),
+            )
         executorch_program = lowered.to_executorch()
-        with open(path, "wb") as f:
-            f.write(executorch_program.buffer)
-        logging.info(f"Wrote ExecuTorch program to {path}")
+        data_file = _write_program(path, executorch_program)
+        if data_file:
+            metadata["data_file"] = data_file
+        metadata.update(_aoti_metadata(delegate))
 
         self._write_metadata_json(path, metadata)
         self._write_tokenizer_files(path)

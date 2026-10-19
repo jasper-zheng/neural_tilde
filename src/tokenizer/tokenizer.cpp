@@ -1,4 +1,5 @@
 #include "tokenizer.h"
+#include "nn_platform.h" // nn::fs_path (UTF-8 paths on Windows)
 
 #include <fstream>
 #include <iostream>
@@ -10,7 +11,7 @@ NnTokenizer::NnTokenizer() = default;
 NnTokenizer::~NnTokenizer() = default;
 
 static std::string read_file(const std::string &path) {
-  std::ifstream f(path, std::ios::binary);
+  std::ifstream f(nn::fs_path(path), std::ios::binary);
   std::stringstream ss;
   ss << f.rdbuf();
   return ss.str();

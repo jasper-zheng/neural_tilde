@@ -35,9 +35,10 @@ from typing import List, Optional, Sequence, Union
 import torch
 
 from ._exporter_base import _ExporterBase, _MethodWrapper
-from ._lowering import (_aoti_graph_transforms, _aoti_prepare,
-                        _executorch_version, _make_init_mutable_passes,
-                        _make_partitioners)
+from ._lowering import (_aoti_edge_config, _aoti_graph_transforms,
+                        _aoti_lowering, _aoti_metadata, _executorch_version,
+                        _make_init_mutable_passes, _make_partitioners,
+                        _write_program)
 
 
 class LiveModule(_ExporterBase):
@@ -283,14 +284,19 @@ class LiveModule(_ExporterBase):
 
         Args:
             path: output path; ``.pte`` is appended if missing.
-            delegate: "xnnpack" (default), "coreml", "mlx", "mps", "metal", or "portable".
-                All persist cached_conv streaming state across execute() (mlx/mps
+            delegate: "xnnpack" (default), "coreml", "mlx", "mps", "metal", "cuda", or
+                "portable". All persist cached_conv streaming state across execute() (mlx/mps
                 verified bit-identical to xnnpack). mlx and mps are experimental with
                 narrower op coverage, so some models abort at runtime — validate each
                 exported model on the target. "metal" (EXPERIMENTAL) whole-graph
                 AOTInductor compile to an embedded Metal .so (needs the ExecuTorch Metal
                 runtime + macOS); cached_conv state persistence across a monolithic AOTI
                 function is UNVERIFIED for streaming — smoke-test before relying on it.
+                "cuda" (Windows x64 + NVIDIA) whole-graph AOTInductor compile to Triton
+                kernels in a DLL embedded in the .pte, with the weights in a ``<name>.ptd``
+                beside it; streaming state persists. Exporting needs a CUDA torch, an NVIDIA
+                GPU and, on Windows, a "Developer PowerShell for VS 2022". Kernels target
+                sm_75 (Turing) and newer; ``NN_CUDA_ARCH`` changes that floor.
             buffer_size: audio-rate block size to export at; must be a multiple
                 of every in_ratio/out_ratio.
             batch: fixed batch dimension baked into the program.
@@ -316,16 +322,15 @@ class LiveModule(_ExporterBase):
                                      _executorch_version())
 
         try:
-            from executorch.exir import to_edge_transform_and_lower
+            from executorch.exir import EdgeCompileConfig, to_edge_transform_and_lower
         except ImportError as e:
             raise ImportError(
                 "export_to_pte requires the 'executorch' package. Install it "
                 "(e.g. `pip install executorch`) or build it from source.") from e
 
-        # AOTInductor delegates (metal) compile one .so per method keyed on its name
-        # (per-method partitioner dict) and need env setup + per-method graph transforms;
-        # the other delegates share one partitioner and need neither.
-        _aoti_prepare(delegate)
+        # AOTInductor delegates (metal, cuda) compile one .so per method keyed on its name
+        # (per-method partitioner dict) and need per-method graph transforms plus a setup
+        # context around lowering; the other delegates share one partitioner and need neither.
         partitioner = _make_partitioners(
             delegate, self._methods, coreml_compute_units=coreml_compute_units)
         aoti_transforms = _aoti_graph_transforms(delegate)
@@ -359,13 +364,18 @@ class LiveModule(_ExporterBase):
         # regardless, so this matters mainly for the xnnpack/portable runtime.
         transform_passes = (_make_init_mutable_passes(primed_buffers)
                             if warmup else None)
-        lowered = to_edge_transform_and_lower(method_graphs,
-                                              transform_passes=transform_passes,
-                                              partitioner=partitioner)
+        edge_config = _aoti_edge_config(delegate)
+        with _aoti_lowering(delegate):
+            lowered = to_edge_transform_and_lower(
+                method_graphs,
+                transform_passes=transform_passes,
+                partitioner=partitioner,
+                compile_config=EdgeCompileConfig(**edge_config) if edge_config else None)
         executorch_program = lowered.to_executorch()
-        with open(path, "wb") as f:
-            f.write(executorch_program.buffer)
-        logging.info(f"Wrote ExecuTorch program to {path}")
+        data_file = _write_program(path, executorch_program)
+        if data_file:
+            metadata["data_file"] = data_file
+        metadata.update(_aoti_metadata(delegate))
 
         self._write_metadata_json(path, metadata)
         # If the model takes a text prompt, emit the standalone tokenizer bundle

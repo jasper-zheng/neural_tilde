@@ -21,6 +21,17 @@ public:
   int load(const std::string &pte_path);
   bool ready() const { return m_ready; }
 
+  // Route diagnostics (the runner's and its Backend's) to `sink`; null =>
+  // the process default (stderr). Set before load().
+  void set_log_sink(nn::LogSink sink) {
+    m_backend.set_log_sink(sink);
+    m_log_sink = std::move(sink);
+  }
+  // Load `method` ahead of the first generate() (see Backend::prepare).
+  int prepare(const std::string &method) { return m_backend.prepare(method); }
+  // Where the model runs, e.g. "CUDA: <gpu> (sm_89)" (see Backend).
+  std::string device_description() { return m_backend.device_description(); }
+
   // Run `method`. For each declared input: if `supplied` has an entry under its
   // name, validate dtype/numel and copy it; else fill by role — Noise => seeded
   // N(0,1), Attribute => clamp(attr_values[name] if given else default, min, max)
@@ -131,5 +142,9 @@ public:
 
 private:
   Backend m_backend;
+  nn::LogSink m_log_sink;
   bool m_ready = false;
+  void log_error(const std::string &msg) const {
+    nn::log(m_log_sink, nn::LogLevel::Error, msg);
+  }
 };

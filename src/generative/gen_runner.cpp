@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <iostream>
 #include <random>
 
 using executorch::aten::ScalarType;
@@ -154,12 +153,12 @@ void GenRunner::prepare_buffer_input(const InputSpec &spec, int fallback_sr,
 int GenRunner::load(const std::string &pte_path) {
   m_ready = false;
   if (m_backend.load(pte_path)) {
-    std::cerr << "neural: could not load " << pte_path << std::endl;
+    log_error("neural: could not load " + pte_path);
     return 1;
   }
   if (!m_backend.is_generative()) {
-    std::cerr << "neural: " << pte_path
-              << " is not a generative model (kind != \"generative\")\n";
+    log_error("neural: " + pte_path +
+              " is not a generative model (kind != \"gen\")");
     return 1;
   }
   m_ready = true;
@@ -175,8 +174,7 @@ int GenRunner::generate(const std::string &method,
 
   const auto &inputs = m_backend.method_inputs(method);
   if (inputs.empty()) {
-    std::cerr << "neural: no generative inputs for method \"" << method
-              << "\"\n";
+    log_error("neural: no generative inputs for method \"" + method + "\"");
     return 1;
   }
 
@@ -195,13 +193,14 @@ int GenRunner::generate(const std::string &method,
     if (it != supplied.end()) {
       const SuppliedInput &s = it->second;
       if (s.numel != n) {
-        std::cerr << "neural: supplied \"" << spec.name << "\" has " << s.numel
-                  << " elems != expected " << n << "\n";
+        log_error("neural: supplied \"" + spec.name + "\" has " +
+                  std::to_string(s.numel) + " elems != expected " +
+                  std::to_string(n));
         return 1;
       }
       if (s.dtype != spec.dtype) {
-        std::cerr << "neural: supplied \"" << spec.name
-                  << "\" dtype does not match the model input\n";
+        log_error("neural: supplied \"" + spec.name +
+                  "\" dtype does not match the model input");
         return 1;
       }
       std::memcpy(dst, s.data, n * dtype_size(spec.dtype));
@@ -251,9 +250,9 @@ int GenRunner::generate(const std::string &method,
     }
     case Role::Condition:
     default:
-      std::cerr << "neural: required conditioning input \"" << spec.name
-                << "\" was not supplied (connect a conditioning source, e.g. "
-                   "neural.tokenizer)\n";
+      log_error("neural: required conditioning input \"" + spec.name +
+                "\" was not supplied (connect a conditioning source, e.g. "
+                "neural.tokenizer)");
       return 1;
     }
     ptrs[i] = dst;

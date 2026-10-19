@@ -99,9 +99,10 @@ from torch._export.converter import TS2EPConverter
 from torch.export.graph_signature import (ExportGraphSignature, InputKind,
                                           OutputKind, OutputSpec, TensorArgument)
 
-from ._lowering import (_aoti_graph_transforms, _aoti_prepare,
-                        _executorch_version, _make_init_mutable_passes,
-                        _make_partitioners)
+from ._lowering import (_aoti_edge_config, _aoti_graph_transforms,
+                        _aoti_lowering, _aoti_metadata, _executorch_version,
+                        _make_init_mutable_passes, _make_partitioners,
+                        _write_program)
 from .live_module import LiveModule
 
 # Methods a RAVE .ts may expose, in nn~ convention (probed via <method>_params).
@@ -526,9 +527,11 @@ def _skip_noise_synth(ep) -> int:
             for tainted in [a for a in inputs if a in taint]:
                 val = tainted.meta["val"]
                 shape = [int(s) for s in val.shape]
+                # An explicit device (CPU here) lets device-moving delegates (CUDA's
+                # move_to_device_pass) retarget it; without one it stays on the CPU.
                 with graph.inserting_before(node):
-                    zeros = graph.call_function(torch.ops.aten.zeros.default,
-                                                (shape,), {"dtype": val.dtype})
+                    zeros = graph.call_function(torch.ops.aten.zeros.default, (shape,),
+                                                {"dtype": val.dtype, "device": val.device})
                 node.replace_input_with(tainted, zeros)
     graph.eliminate_dead_code()
     ep.graph_module.recompile()
@@ -708,6 +711,15 @@ def migrate(ts_path: str, out: str, delegate: str = "coreml",
 
     logging.info("Migrating %s: methods=%s buffer_size=%d delegate=%s rng=%s",
                  ts_path, list(methods), buffer_size, delegate, rng)
+    if delegate == "cuda":
+        # Migrated RAVE lowers to CUDA (with --skip-noise-synth: the FFT synth has no CUDA
+        # kernels) but the compiled program currently diverges from eager — the same graph is
+        # correct run eagerly on the GPU, and LiveModule exports of cached-conv models are
+        # correct on CUDA. Under investigation (WP7).
+        logging.warning(
+            "delegate='cuda' for migrated TorchScript models is EXPERIMENTAL: migrated RAVE "
+            "output currently diverges from the original. Validate before use, or re-export "
+            "from the checkpoint with LiveModule.export_to_pte(delegate='cuda').")
 
     method_graphs = {}
     primed = {}  # method name -> FQNs of its lifted streaming caches (for the zero-init pass)
@@ -760,10 +772,11 @@ def migrate(ts_path: str, out: str, delegate: str = "coreml",
             f"No method of {ts_path} could be converted by TS2EPConverter (control flow it "
             "cannot handle). Re-export from the RAVE checkpoint via the eager LiveModule path.")
 
-    cfg = EdgeCompileConfig(_check_ir_validity=False,
-                            _core_aten_ops_exception_list=list(_RNG_OPS))
-    # AOTInductor delegates: env setup once, per-method transforms on each lowering's copy.
-    _aoti_prepare(delegate)
+    cfg = EdgeCompileConfig(**{"_check_ir_validity": False,
+                               "_core_aten_ops_exception_list": list(_RNG_OPS),
+                               **_aoti_edge_config(delegate)})
+    # AOTInductor delegates: per-method transforms on each lowering's copy, and a setup
+    # context around each lowering.
     aoti_transforms = _aoti_graph_transforms(delegate)
 
     def _lower(graphs: dict):
@@ -779,7 +792,7 @@ def migrate(ts_path: str, out: str, delegate: str = "coreml",
         for name in graphs:
             for transform in aoti_transforms:
                 graphs[name] = transform(graphs[name])
-        with torch.no_grad():
+        with torch.no_grad(), _aoti_lowering(delegate):
             return to_edge_transform_and_lower(
                 graphs,
                 transform_passes=_make_init_mutable_passes(buffers),
@@ -819,11 +832,12 @@ def migrate(ts_path: str, out: str, delegate: str = "coreml",
 
     if not out.endswith(".pte"):
         out += ".pte"
-    with open(out, "wb") as f:
-        f.write(executorch_program.buffer)
-    logging.info("Wrote ExecuTorch program to %s", out)
+    data_file = _write_program(out, executorch_program)
 
     live, metadata = _build_metadata({k: methods[k] for k in kept}, buffer_size, delegate)
+    if data_file:
+        metadata["data_file"] = data_file
+    metadata.update(_aoti_metadata(delegate))
     live._write_metadata_json(out, metadata)
     return out
 
@@ -836,10 +850,13 @@ def main() -> None:
     ap.add_argument("--out", default=None,
                     help="output path; .pte is appended (default: model name without .ts)")
     ap.add_argument("--delegate", default="coreml",
-                    choices=["coreml", "xnnpack", "metal", "portable"],
-                    help="ExecuTorch backend (coreml recommended; compiles RNG, but skips "
-                         "FFT-synth methods it can't represent — see module docstring). "
-                         "metal is EXPERIMENTAL (AOTInductor; unvalidated for RAVE)")
+                    choices=["coreml", "xnnpack", "metal", "cuda", "portable"],
+                    help="ExecuTorch backend (coreml recommended on macOS; compiles RNG, but "
+                         "skips FFT-synth methods it can't represent — see module docstring). "
+                         "metal is EXPERIMENTAL (AOTInductor; unvalidated for RAVE). cuda is "
+                         "EXPERIMENTAL for migrated models: Windows + NVIDIA (AOTInductor; "
+                         "writes a .ptd beside the .pte; use --skip-noise-synth for RAVE; "
+                         "output currently diverges — validate)")
     ap.add_argument("--buffer-size", type=int, default=None,
                     help="audio block size to bake in (default: the model's largest ratio)")
     ap.add_argument("--rng", default="keep", choices=["keep", "zero"],

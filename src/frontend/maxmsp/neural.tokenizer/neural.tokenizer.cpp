@@ -17,6 +17,7 @@
 
 #include "../../../tokenizer/tokenizer.h"
 #include "../../../tokenizer/tokenizer_config.h"
+#include "../shared/vc_runtime_check.h"
 #include "c74_min.h"
 
 #include <string>
@@ -95,6 +96,7 @@ public:
       [this](const atoms &args, const int inlet) -> atoms {
         cout << "neural.tokenizer " << VERSION << " - Jasper Shuoyang Zheng"
              << endl;
+        check_vc_runtime();
         return {};
       }};
 
@@ -182,8 +184,8 @@ void tokenizer_obj::load_tokenizer(std::string arg_path) {
     } else {
       cerr << "no tokenizer config found (" << cand
            << "); using default configuration (max_length=" << (int)max_length
-           << ", pad_token=" << std::string(pad_token.get())
-           << ", padding_side=" << std::string(padding_side.get()) << ")"
+           << ", pad_token=" << std::string(pad_token.get().c_str())
+           << ", padding_side=" << std::string(padding_side.get().c_str()) << ")"
            << endl;
       cout << "loaded " << abs << endl;
     }
@@ -199,8 +201,8 @@ void tokenizer_obj::tokenize(const std::string &prompt) {
   }
   std::vector<int64_t> ids;
   std::vector<int32_t> mask;
-  if (!m_tok.encode(prompt, max_length, std::string(pad_token.get()),
-                    std::string(padding_side.get()), ids, mask)) {
+  if (!m_tok.encode(prompt, max_length, std::string(pad_token.get().c_str()),
+                    std::string(padding_side.get().c_str()), ids, mask)) {
     cerr << "tokenization failed" << endl;
     return;
   }

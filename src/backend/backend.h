@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -9,6 +10,8 @@
 
 #include <executorch/extension/module/module.h>
 #include <executorch/extension/tensor/tensor.h>
+
+#include "nn_log.h"
 
 // Name printed in the boot banner of the Max externals (replaces TORCH_VERSION).
 #ifndef NN_ENGINE_NAME
@@ -99,6 +102,10 @@ struct SuppliedInput {
 // reuses it (see EXECUTORCH_PROTOCOL.md).
 class Backend {
 protected:
+  // In-memory program/weights, used only when a path can't be opened by
+  // ExecuTorch's narrow-path loaders (non-ASCII on Windows). Declared before
+  // m_module so they are destroyed after it.
+  std::vector<uint8_t> m_program_bytes, m_data_bytes;
   std::unique_ptr<executorch::extension::Module> m_module;
   int m_loaded;
   // True once the metadata JSON has been parsed (the model's I/O is known),
@@ -136,11 +143,62 @@ protected:
   std::vector<std::mt19937_64> m_noise_streams;
   std::atomic<bool> m_reseed_noise{true};
 
+  // Top-level export metadata (see PROTOCOL.md): which delegate the program was
+  // lowered for, the platform its compiled kernels target (AOTI delegates), the
+  // external weights file, and the CUDA architectures it carries.
+  std::string m_delegate, m_platform, m_data_file, m_executorch_version;
+  std::string m_data_override; // load()'s data_path
+  int m_cuda_min_arch = 0;
+  std::vector<int> m_cuda_archs;
+  std::string m_device_desc;
+
+  // Diagnostics sink (null => nn's default sink, i.e. stderr unless the host
+  // installed one). An execute() failure is reported once per load, not on
+  // every audio block.
+  nn::LogSink m_log_sink;
+  std::atomic<bool> m_exec_error_logged{false};
+  void log(nn::LogLevel level, const std::string &msg) const;
+  void log_error(const std::string &msg) const {
+    log(nn::LogLevel::Error, msg);
+  }
+  // For errors raised per audio block in perform(): only the first since the
+  // last load() is reported.
+  void log_block_error(const std::string &msg);
+
   // Parse "<basename>.json" beside the .pte into m_methods / m_buffer_size.
   bool load_metadata(const std::string &pte_path);
+  // Why this host can't run the model ("" if it can): the delegate is compiled
+  // into this build, the platform matches, and for CUDA a capable GPU exists.
+  std::string compatibility_problem();
+  // The program's external weights file (absolute, UTF-8), "" if it has none.
+  // Sets `missing` when the metadata names one that isn't on disk.
+  std::string resolve_data_file(const std::string &pte_path, bool &missing);
+  // Build the ExecuTorch Module, falling back to in-memory loaders for paths
+  // ExecuTorch can't open. Null on failure (already logged).
+  std::unique_ptr<executorch::extension::Module>
+  make_module(const std::string &pte_path, const std::string &ptd_path,
+              std::vector<uint8_t> &program_bytes,
+              std::vector<uint8_t> &data_bytes);
 
 public:
   Backend();
+
+  // Route this instance's diagnostics (and ExecuTorch errors raised while it
+  // calls into the runtime) to `sink`. Null => the process default (stderr).
+  // Set before load(); not synchronised with a running perform().
+  void set_log_sink(nn::LogSink sink);
+
+  // Load `method` now (kernel/weights upload for GPU delegates) instead of on
+  // the first perform()/generate(), so the cost and any error land here, off
+  // the audio path. Returns 0 on success.
+  int prepare(const std::string &method);
+
+  // Where the model runs, for banners / neural.info: e.g.
+  // "CUDA: NVIDIA GeForce RTX 4070 Laptop GPU (sm_89)" or "CPU (XNNPACK)".
+  // Empty before a successful load.
+  std::string device_description();
+  // The JSON `delegate` ("xnnpack", "cuda", ...; "" if absent).
+  std::string delegate();
 
   // attr_values (optional): current value of each Attribute-role input, in
   // declared order; a value not supplied (shorter list / empty) falls back to
@@ -152,7 +210,9 @@ public:
                const std::vector<float> &attr_values = {},
                const std::map<std::string, SuppliedInput> &supplied = {});
 
-  int load(std::string path);
+  // `data_path` (optional) overrides the external weights file the metadata
+  // declares (or "<basename>.ptd" beside the .pte); reload() keeps it.
+  int load(std::string path, std::string data_path = "");
   int reload();
   // True only when the .pte program is present and the model can run. Gates
   // execution (perform / generate).
@@ -190,8 +250,9 @@ public:
                const std::vector<const void *> &input_data,
                std::vector<float> &out_audio);
 
-  // Reset a model's persistent internal state to its zero initial value. Safe
-  // fallback reloads the program; callable from a frontend `reset` message.
+  // Reset a model's persistent internal state to its initial value. Re-creates
+  // the loaded methods in place (keeping the program and weights file open),
+  // falling back to a full reload; callable from a frontend `reset` message.
   void reset();
 
   // Inlet/outlet names (derived from the signal input / output specs).

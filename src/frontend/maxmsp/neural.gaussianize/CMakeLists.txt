@@ -6,6 +6,7 @@ cmake_minimum_required(VERSION 3.24)
 
 set(C74_MIN_API_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../min-api)
 include(${C74_MIN_API_DIR}/script/min-pretarget.cmake)
+nn_frontend_pretarget()             # dynamic MSVC runtime (see nn_executorch.cmake)
 
 if (APPLE)
 	set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum OS X deployment version" FORCE)
@@ -21,9 +22,6 @@ include_directories(
 
 set(SOURCE_FILES neural.gaussianize.cpp)
 
-set(VERSION "0.0.5")
-add_definitions(-DVERSION="${VERSION}")
-
 add_library(
 	${PROJECT_NAME}
 	MODULE
@@ -38,6 +36,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 endif()
 
 include(${C74_MIN_API_DIR}/script/min-posttarget.cmake)
+nn_frontend_settings(${PROJECT_NAME})  # VERSION + MSVC flags
 
 if (APPLE)
 if (CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")

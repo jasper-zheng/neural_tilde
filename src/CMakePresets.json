@@ -1,0 +1,36 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "windows-cuda-release",
+      "displayName": "Windows x64, ExecuTorch 1.5 (CUDA + XNNPACK), Release",
+      "description": "All Max externals + smoke tests. Override the ExecuTorch install with -DEXECUTORCH_ROOT=... if it isn't at C:/dev/executorch/cmake-out.",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "binaryDir": "${sourceParentDir}/build",
+      "cacheVariables": {
+        "EXECUTORCH_ROOT": "C:/dev/executorch/cmake-out",
+        "NN_ENABLE_TOKENIZER": "ON"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "macos-release",
+      "displayName": "macOS arm64, ExecuTorch (Apple delegates + XNNPACK), Release",
+      "description": "All Max externals + smoke tests. Set EXECUTORCH_ROOT in the environment.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceParentDir}/build_et",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "EXECUTORCH_ROOT": "$env{EXECUTORCH_ROOT}"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-cuda-release", "configurePreset": "windows-cuda-release", "configuration": "Release" },
+    { "name": "macos-release", "configurePreset": "macos-release" }
+  ]
+}

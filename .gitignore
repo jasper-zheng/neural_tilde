@@ -25,3 +25,8 @@ releases
 logs
 
 host_tests
+
+WORK_PACKAGES.md
+
+_externals_dev
+_support_dev

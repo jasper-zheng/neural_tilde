@@ -7,7 +7,7 @@ project(tokenizer)
 add_library(tokenizer STATIC tokenizer.cpp tokenizer_config.cpp)
 set_property(TARGET tokenizer PROPERTY CXX_STANDARD 17)
 target_include_directories(tokenizer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(tokenizer PUBLIC tokenizers_cpp)
+target_link_libraries(tokenizer PUBLIC tokenizers_cpp nn_platform) # nn_platform: UTF-8 paths
 
 # Standalone token-for-token parity test against the HF golden (no Max needed).
 add_executable(tok_test tok_test.cpp)

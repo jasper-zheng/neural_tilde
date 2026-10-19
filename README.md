@@ -82,6 +82,8 @@ To install:
  - Restart Max. All 7 objects will then be available.
  - If Max give you a warn about quarantine, please proceed.
 
+**Windows x64:** use the `windows_x64` zip, and unzip the `neural_tilde` folder into `Documents\Max 9\Packages\`. Also install the latest [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe); the one Max brings can be too old. CUDA models need an NVIDIA GPU and driver 580 or newer, while CPU (XNNPACK) models run on any machine. See `INSTALL-windows.txt` in the zip.
+
 If the externals still fail to load, you may consider building the externals yourself by following [Build.md](Build.md).
 
 ## Objects

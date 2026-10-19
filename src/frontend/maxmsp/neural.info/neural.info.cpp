@@ -4,8 +4,14 @@
 //   [neural.info mymodel.json]      load + emit on instantiate
 //   read <path>                     (re)load the metadata and emit
 //   bang                            re-emit the currently loaded dictionary
+//
+// The emitted dictionary also carries a `host` entry describing this machine
+// (platform, CUDA driver and GPU), to compare with the model's `delegate`,
+// `platform` and `cuda_min_arch`.
 
-#include "../shared/neural_common.h" 
+#include "../shared/neural_common.h"
+#include "nn_platform.h" // nn::fs_path, host platform + CUDA device query
+#include "../shared/vc_runtime_check.h"
 #include "c74_min.h"
 
 #include <fstream>
@@ -61,6 +67,7 @@ public:
   message<> maxclass_setup{
       this, "maxclass_setup", [this](const atoms &, const int) -> atoms {
         cout << "neural.info " << VERSION << " - Jasper Shuoyang Zheng" << endl;
+        check_vc_runtime();
         return {};
       }};
 
@@ -72,6 +79,8 @@ private:
   symbol m_dict_name;
 
   void load_metadata(std::string arg);
+  // Append the `host` sub-dictionary (this machine) to m_dict.
+  void append_host();
 };
 
 info::info(const atoms &args) {
@@ -102,7 +111,7 @@ void info::load_metadata(std::string arg) {
     return;
   }
 
-  std::ifstream f(json_abs, std::ios::binary);
+  std::ifstream f(nn::fs_path(json_abs), std::ios::binary);
   if (!f) {
     cerr << "could not open " << json_abs << endl;
     return;
@@ -128,10 +137,41 @@ void info::load_metadata(std::string arg) {
   mx::dictionary_clear(m_dict);
   mx::dictionary_clone_to_existing(parsed, m_dict);
   mx::object_free(parsed);
+  append_host();
 
   m_loaded = true;
   cout << "loaded " << json_abs << endl;
   m_dict_out.send("dictionary", m_dict_name);
+}
+
+// host: { platform, [vc_runtime,] cuda_driver, gpu, gpu_arch } or, without a
+// usable NVIDIA GPU, { platform, [vc_runtime,] cuda_driver, cuda_error }. The
+// device query runs once per process (nvcuda.dll is loaded at runtime, so this
+// works without a driver). vc_runtime (Windows) is the loaded C++ runtime.
+void info::append_host() {
+  mx::t_dictionary *host = mx::dictionary_new();
+  mx::dictionary_appendsym(host, mx::gensym("platform"),
+                           mx::gensym(nn::host_platform()));
+  const nn::RuntimeVersion rt = nn::vc_runtime_version();
+  if (rt.major > 0) {
+    const std::string s = std::to_string(rt.major) + "." + std::to_string(rt.minor);
+    mx::dictionary_appendsym(host, mx::gensym("vc_runtime"), mx::gensym(s.c_str()));
+  }
+  const nn::CudaDeviceInfo &dev = nn::cuda_device_info();
+  const std::string driver = dev.driver_version > 0
+                                 ? nn::cuda_version_string(dev.driver_version)
+                                 : std::string("none");
+  mx::dictionary_appendsym(host, mx::gensym("cuda_driver"),
+                           mx::gensym(driver.c_str()));
+  if (dev.ok) {
+    mx::dictionary_appendsym(host, mx::gensym("gpu"), mx::gensym(dev.name.c_str()));
+    mx::dictionary_appendlong(host, mx::gensym("gpu_arch"), dev.cc);
+  } else {
+    mx::dictionary_appendsym(host, mx::gensym("cuda_error"),
+                             mx::gensym(dev.error.c_str()));
+  }
+  // m_dict takes ownership of `host`.
+  mx::dictionary_appenddictionary(m_dict, mx::gensym("host"), (mx::t_object *)host);
 }
 
 MIN_EXTERNAL(info);

@@ -2,13 +2,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <random>
+
+#include <executorch/extension/data_loader/buffer_data_loader.h>
+#include <executorch/runtime/backend/interface.h>
 
 #include "json.hpp"       // nlohmann/json single-header, vendored into src/backend/
 #include "noise_seed.h"   // noise_substream_seed (shared with GenRunner)
+#include "nn_platform.h"  // UTF-8 paths, CUDA device query
 
 // ---------------------------------------------------------------------------
 // ExecuTorch C++ API NOTES (verify against the installed headers when wiring
@@ -31,16 +36,41 @@ using json = nlohmann::json;
 
 // --- Generative-profile helpers (see EXECUTORCH_PROTOCOL.md §7) -------------
 
-// Map a metadata dtype string to an ExecuTorch ScalarType. Defaults to Float.
-static ScalarType parse_dtype(const std::string &s) {
+// Map a metadata dtype string to an ExecuTorch ScalarType. Unknown => Float,
+// reported through `unknown` so the caller can log it.
+static ScalarType parse_dtype(const std::string &s, std::string &unknown) {
   if (s == "int64" || s == "long")
     return ScalarType::Long;
   if (s == "int32" || s == "int")
     return ScalarType::Int;
   if (s == "float32" || s == "float")
     return ScalarType::Float;
-  std::cerr << "neural: unknown dtype \"" << s << "\", assuming float32\n";
+  unknown = s;
   return ScalarType::Float;
+}
+
+// The ExecuTorch backend id a JSON `delegate` lowers to ("" => no delegate
+// to check, e.g. portable or an older export without the field).
+static const char *backend_id(const std::string &delegate) {
+  if (delegate == "xnnpack")
+    return "XnnpackBackend";
+  if (delegate == "cuda")
+    return "CudaBackend";
+  if (delegate == "coreml")
+    return "CoreMLBackend";
+  if (delegate == "mlx")
+    return "MLXBackend";
+  if (delegate == "metal")
+    return "MetalBackend";
+  if (delegate == "mps")
+    return "MPSBackend";
+  return "";
+}
+
+// Delegates whose compiled programs only exist for Apple hosts.
+static bool apple_only(const std::string &delegate) {
+  return delegate == "coreml" || delegate == "mlx" || delegate == "metal" ||
+         delegate == "mps";
 }
 
 static size_t et_dtype_size(ScalarType t) {
@@ -79,7 +109,21 @@ static Role parse_role(const std::string &s) {
 
 Backend::Backend()
     : m_loaded(0), m_metadata_loaded(false), m_buffer_size(0),
-      m_generative(false), m_seed(0) {}
+      m_generative(false), m_seed(0) {
+  nn::install_executorch_log_forwarding();
+}
+
+void Backend::log(nn::LogLevel level, const std::string &msg) const {
+  nn::log(m_log_sink, level, msg);
+}
+
+void Backend::set_log_sink(nn::LogSink sink) { m_log_sink = std::move(sink); }
+
+void Backend::log_block_error(const std::string &msg) {
+  if (!m_exec_error_logged.exchange(true, std::memory_order_relaxed))
+    log_error(msg + " (further errors from this model are not reported "
+                    "until it is reloaded)");
+}
 
 bool Backend::load_metadata(const std::string &pte_path) {
   // Metadata lives next to the .pte with the same basename and a .json suffix.
@@ -89,9 +133,9 @@ bool Backend::load_metadata(const std::string &pte_path) {
     json_path = json_path.substr(0, dot);
   json_path += ".json";
 
-  std::ifstream f(json_path);
+  std::ifstream f(nn::fs_path(json_path));
   if (!f.is_open()) {
-    std::cerr << "neural: missing metadata " << json_path << std::endl;
+    log_error("neural: missing metadata " + json_path);
     return false;
   }
 
@@ -99,8 +143,7 @@ bool Backend::load_metadata(const std::string &pte_path) {
   try {
     f >> j;
   } catch (const std::exception &e) {
-    std::cerr << "neural: failed to parse " << json_path << ": " << e.what()
-              << std::endl;
+    log_error("neural: failed to parse " + json_path + ": " + e.what());
     return false;
   }
 
@@ -111,17 +154,25 @@ bool Backend::load_metadata(const std::string &pte_path) {
   // Top-level model kind: REQUIRED. "live" (streaming, §2) vs "gen" (generative,
   // §3). No default and no back-compat — a missing or unknown kind is an error.
   if (!j.contains("kind")) {
-    std::cerr << "neural: metadata " << json_path
-              << " missing required \"kind\" (expected \"live\" or \"gen\")"
-              << std::endl;
+    log_error("neural: metadata " + json_path +
+              " missing required \"kind\" (expected \"live\" or \"gen\")");
     return false;
   }
   const std::string kind = j.value("kind", std::string());
   if (kind != "live" && kind != "gen") {
-    std::cerr << "neural: metadata " << json_path << " has unknown kind \"" << kind
-              << "\" (expected \"live\" or \"gen\")" << std::endl;
+    log_error("neural: metadata " + json_path + " has unknown kind \"" + kind +
+              "\" (expected \"live\" or \"gen\")");
     return false;
   }
+
+  // Export provenance + runtime requirements (all optional: older exports and
+  // CPU delegates omit the platform/CUDA fields, which skips those checks).
+  m_delegate = j.value("delegate", std::string());
+  m_platform = j.value("platform", std::string());
+  m_data_file = j.value("data_file", std::string());
+  m_executorch_version = j.value("executorch_version", std::string());
+  m_cuda_min_arch = j.value("cuda_min_arch", 0);
+  m_cuda_archs = j.value("cuda_archs", std::vector<int>{});
   m_generative = (kind == "gen");
   // Default RNG seed for "noise" inputs (both kinds; absent => 0). gen reads it
   // per generate(); live seeds its per-input streams from it (reseed on load).
@@ -129,9 +180,10 @@ bool Backend::load_metadata(const std::string &pte_path) {
   m_reseed_noise.store(true, std::memory_order_release);
 
   if (!j.contains("methods")) {
-    std::cerr << "neural: no \"methods\" in " << json_path << std::endl;
+    log_error("neural: no \"methods\" in " + json_path);
     return false;
   }
+  std::string unknown_dtype;
 
   // Both kinds describe a method as an ordered "inputs" list + a single audio
   // "output" (see EXECUTORCH_PROTOCOL.md). The parse is shared; only the role
@@ -147,8 +199,8 @@ bool Backend::load_metadata(const std::string &pte_path) {
                      : m.value("batch", 1);
 
     if (!m.contains("inputs") || !m["inputs"].is_array()) {
-      std::cerr << "neural: method \"" << name << "\" has no \"inputs\" array in "
-                << json_path << std::endl;
+      log_error("neural: method \"" + name + "\" has no \"inputs\" array in " +
+                json_path);
       return false;
     }
     int signal_count = 0, buffer_count = 0;
@@ -156,7 +208,8 @@ bool Backend::load_metadata(const std::string &pte_path) {
       InputSpec spec;
       spec.name = in.value("name", std::string());
       spec.role = parse_role(in.value("role", std::string("attribute")));
-      spec.dtype = parse_dtype(in.value("dtype", std::string("float32")));
+      spec.dtype =
+          parse_dtype(in.value("dtype", std::string("float32")), unknown_dtype);
       spec.shape = in.value("shape", std::vector<int>{});
       spec.min = in.value("min", 0.0);
       spec.max = in.value("max", 0.0);
@@ -183,7 +236,14 @@ bool Backend::load_metadata(const std::string &pte_path) {
     const json &out = m.contains("output") ? m["output"] : json::object();
     info.output.name = out.value("name", std::string());
     info.output.role = parse_role(out.value("role", std::string("signal")));
-    info.output.dtype = parse_dtype(out.value("dtype", std::string("float32")));
+    info.output.dtype =
+        parse_dtype(out.value("dtype", std::string("float32")), unknown_dtype);
+    if (!unknown_dtype.empty()) {
+      log(nn::LogLevel::Warning, "neural: unknown dtype \"" + unknown_dtype +
+                                     "\" in method \"" + name +
+                                     "\", assuming float32");
+      unknown_dtype.clear();
+    }
     info.output.shape = out.value("shape", std::vector<int>{});
     info.output.channels = out.value("channels", 0);
     info.output.length = out.value("length", 0);
@@ -196,19 +256,19 @@ bool Backend::load_metadata(const std::string &pte_path) {
 
     // Kind-specific shape of the inputs list.
     if (!m_generative && signal_count != 1) {
-      std::cerr << "neural: live method \"" << name
-                << "\" must declare exactly one \"signal\" input (got "
-                << signal_count << ")" << std::endl;
+      log_error("neural: live method \"" + name +
+                "\" must declare exactly one \"signal\" input (got " +
+                std::to_string(signal_count) + ")");
       return false;
     }
     if (!m_generative && buffer_count != 0) {
-      std::cerr << "neural: live method \"" << name
-                << "\" must not declare a \"buffer\" input (gen-only)" << std::endl;
+      log_error("neural: live method \"" + name +
+                "\" must not declare a \"buffer\" input (gen-only)");
       return false;
     }
     if (m_generative && signal_count != 0) {
-      std::cerr << "neural: generative method \"" << name
-                << "\" must not declare a \"signal\" input" << std::endl;
+      log_error("neural: generative method \"" + name +
+                "\" must not declare a \"signal\" input");
       return false;
     }
 
@@ -218,65 +278,264 @@ bool Backend::load_metadata(const std::string &pte_path) {
   return true;
 }
 
-int Backend::load(std::string path) {
+static std::string error_code(executorch::runtime::Error e) {
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "0x%x", (unsigned)e);
+  return buf;
+}
+
+std::string Backend::compatibility_problem() {
+  // 1. Is the delegate the program was lowered for compiled into this build?
+  // Covers macOS-only models on Windows and CUDA models on macOS alike.
+  const char *id = backend_id(m_delegate);
+  if (*id && executorch::runtime::get_backend_class(id) == nullptr) {
+    std::string msg = "it uses the \"" + m_delegate +
+                      "\" backend, which this build of neural_tilde doesn't "
+                      "include";
+    if (apple_only(m_delegate))
+      msg += " (it is macOS-only)";
+    msg += "; re-export it with delegate=\"xnnpack\" (CPU)";
+    if (std::string(nn::host_platform()) == "windows")
+      msg += " or delegate=\"cuda\" (NVIDIA GPU)";
+    return msg;
+  }
+  if (m_delegate != "cuda")
+    return "";
+
+  // 2. AOTI programs embed a native library compiled for one OS.
+  const std::string host = nn::host_platform();
+  if (!m_platform.empty() && m_platform != host)
+    return "it was exported for CUDA on " + m_platform + ", but this is " +
+           host + "; re-export it on " + host;
+
+  // 3. A CUDA device and a driver new enough for the runtime's CUDA version.
+  const nn::CudaDeviceInfo &dev = nn::cuda_device_info();
+#if defined(NN_CUDA_REQUIRED_VERSION) && NN_CUDA_REQUIRED_VERSION > 0
+  if (dev.driver_version > 0 && dev.driver_version < NN_CUDA_REQUIRED_VERSION)
+    return "the NVIDIA driver supports CUDA " +
+           nn::cuda_version_string(dev.driver_version) +
+           ", but this build of neural_tilde needs CUDA " +
+           nn::cuda_version_string(NN_CUDA_REQUIRED_VERSION) +
+           " or newer; update the NVIDIA driver";
+#endif
+  if (!dev.ok)
+    return dev.error + "; this model needs an NVIDIA GPU (use a "
+                       "delegate=\"xnnpack\" export to run on the CPU)";
+
+  // 4. The GPU is at least the oldest architecture the kernels were built for.
+  if (m_cuda_min_arch > 0 && dev.cc < m_cuda_min_arch)
+    return "the GPU (" + dev.name + ") is sm_" + std::to_string(dev.cc) +
+           ", but this model needs sm_" + std::to_string(m_cuda_min_arch) +
+           " or newer";
+  return "";
+}
+
+std::string Backend::resolve_data_file(const std::string &pte_path,
+                                       bool &missing) {
+  missing = false;
+  if (!m_data_override.empty()) {
+    missing = !nn::file_exists(m_data_override);
+    return m_data_override;
+  }
+  const std::filesystem::path pte = nn::fs_path(pte_path);
+  if (!m_data_file.empty()) {
+    // Declared by the exporter, relative to the .pte's folder.
+    const std::string ptd =
+        nn::utf8_string(pte.parent_path() / nn::fs_path(m_data_file));
+    missing = !nn::file_exists(ptd);
+    return ptd;
+  }
+  // Undeclared: pick up "<basename>.ptd" beside the .pte if one exists.
+  std::filesystem::path guess = pte;
+  guess.replace_extension(".ptd");
+  const std::string ptd = nn::utf8_string(guess);
+  return nn::file_exists(ptd) ? ptd : std::string();
+}
+
+std::unique_ptr<Module>
+Backend::make_module(const std::string &pte_path, const std::string &ptd_path,
+                     std::vector<uint8_t> &program_bytes,
+                     std::vector<uint8_t> &data_bytes) {
+  using executorch::extension::BufferDataLoader;
+  const std::string pte = nn::loader_path(pte_path);
+  const std::string ptd = ptd_path.empty() ? "" : nn::loader_path(ptd_path);
+  if (!pte.empty() && (ptd_path.empty() || !ptd.empty()))
+    return ptd_path.empty() ? std::make_unique<Module>(pte)
+                            : std::make_unique<Module>(pte, ptd);
+
+  // ExecuTorch's file loaders take narrow (ANSI code page) paths on Windows; a
+  // path with no ASCII form is read into memory here instead.
+  if (!nn::read_file(pte_path, program_bytes)) {
+    log_error("neural: could not read \"" + pte_path + "\"");
+    return nullptr;
+  }
+  std::unique_ptr<executorch::runtime::DataLoader> data_loader;
+  if (!ptd_path.empty()) {
+    if (!nn::read_file(ptd_path, data_bytes)) {
+      log_error("neural: could not read \"" + ptd_path + "\"");
+      return nullptr;
+    }
+    data_loader =
+        std::make_unique<BufferDataLoader>(data_bytes.data(), data_bytes.size());
+  }
+  return std::make_unique<Module>(
+      std::make_unique<BufferDataLoader>(program_bytes.data(),
+                                         program_bytes.size()),
+      nullptr, nullptr, nullptr, std::move(data_loader));
+}
+
+static std::string describe_device(const std::string &delegate) {
+  if (delegate == "cuda") {
+    const nn::CudaDeviceInfo &dev = nn::cuda_device_info();
+    return "CUDA: " + dev.name + " (sm_" + std::to_string(dev.cc) + ")";
+  }
+  if (delegate == "xnnpack")
+    return "CPU (XNNPACK)";
+  if (delegate == "coreml")
+    return "Core ML";
+  if (delegate == "mlx")
+    return "GPU (MLX)";
+  if (delegate == "metal")
+    return "GPU (Metal)";
+  if (delegate == "mps")
+    return "GPU (MPS)";
+  return "CPU";
+}
+
+int Backend::load(std::string path, std::string data_path) {
+  nn::LogScope log_scope(&m_log_sink);
+  m_data_override = std::move(data_path);
   // Parse the metadata FIRST: without it we know nothing about the model's I/O
   // and cannot even build the host's inlets/attributes. A failure here is the
   // only hard error — the caller has nothing to set up.
   m_loaded = 0;
   m_metadata_loaded = false;
-  if (!load_metadata(path)) {
-    std::cerr << "neural: could not load metadata for " << path << std::endl;
+  bool metadata_ok = false;
+  try {
+    metadata_ok = load_metadata(path);
+  } catch (const std::exception &e) { // e.g. a field of the wrong JSON type
+    log_error("neural: invalid metadata for " + path + ": " + e.what());
+  }
+  if (!metadata_ok) {
+    log_error("neural: could not load metadata for " + path);
     return 1;
   }
   m_metadata_loaded = true;
   m_path = path;
+  m_device_desc.clear();
+  m_exec_error_logged.store(false, std::memory_order_relaxed);
 
-  // Is the program (.pte) actually on disk? Metadata MAY ship without it; we
-  // keep the parsed metadata (so the host can still create inlets/attributes)
-  // but mark the model non-runnable and report it. is_loaded() stays false.
-  std::ifstream pte_file(path, std::ios::binary);
-  if (!pte_file.good()) {
-    std::cerr << "neural: program \"" << path
-              << "\" not found — metadata loaded, but the model is disabled "
-                 "(provide the .pte to enable it)"
-              << std::endl;
+  // Every reason the program can't run keeps the parsed metadata (so the host
+  // can still create inlets/attributes) but marks the model non-runnable and
+  // reports why. is_loaded() stays false.
+  auto disable = [&](const std::string &why) {
+    log_error("neural: " + why +
+              " — metadata loaded, but the model is disabled");
     std::unique_lock<std::mutex> model_lock(m_model_mutex);
     m_module.reset();
+    m_program_bytes.clear();
+    m_data_bytes.clear();
     return 0; // success enough to set up I/O; not runnable
-  }
+  };
+
+  // Is the program (.pte) actually on disk? Metadata MAY ship without it.
+  if (!nn::file_exists(path))
+    return disable("program \"" + path +
+                   "\" not found (provide the .pte to enable it)");
+
+  const std::string problem = compatibility_problem();
+  if (!problem.empty())
+    return disable("cannot run \"" + path + "\": " + problem);
+
+  bool data_missing = false;
+  const std::string ptd = resolve_data_file(path, data_missing);
+  if (data_missing)
+    return disable("weights file \"" + ptd +
+                   "\" not found (it must sit beside the .pte)");
+
+  if (m_delegate == "cuda")
+    nn::sweep_stale_cuda_kernel_files(); // left by earlier sessions (Windows)
 
   try {
-    auto module = std::make_unique<Module>(path);
+    std::vector<uint8_t> program_bytes, data_bytes;
+    auto module = make_module(path, ptd, program_bytes, data_bytes);
+    if (!module)
+      return disable("could not open \"" + path + "\"");
 
-    // Best-effort: warn if the .pte's runnable methods diverge from the JSON.
-    try {
-      auto names = module->method_names();
-      if (names.ok()) {
-        for (const auto &name : m_available_methods) {
-          if (!names->count(name))
-            std::cerr << "neural: method \"" << name
-                      << "\" listed in JSON but absent from .pte" << std::endl;
-        }
-      }
-    } catch (...) {
-    }
+    // Parses the program: a corrupt or incompatible .pte fails here, not on
+    // the first audio block. Also warn if its methods diverge from the JSON.
+    auto names = module->method_names();
+    if (!names.ok())
+      return disable("could not read program \"" + path + "\" (error " +
+                     error_code(names.error()) +
+                     "; was it exported with a different ExecuTorch version? "
+                     "metadata says " +
+                     (m_executorch_version.empty() ? "unknown"
+                                                   : m_executorch_version) +
+                     ")");
+    for (const auto &name : m_available_methods)
+      if (!names->count(name))
+        log(nn::LogLevel::Warning, "neural: method \"" + name +
+                                       "\" listed in JSON but absent from .pte");
 
     std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    // The old module goes first, then the buffers it may have read from.
     m_module = std::move(module);
+    m_program_bytes = std::move(program_bytes);
+    m_data_bytes = std::move(data_bytes);
     m_loaded = 1;
     model_lock.unlock();
-    return 0;
   } catch (const std::exception &e) {
-    // The metadata is still usable, so treat a program-load failure like a
-    // missing program: set up I/O but stay disabled.
-    std::cerr << e.what() << '\n';
-    std::unique_lock<std::mutex> model_lock(m_model_mutex);
-    m_module.reset();
-    return 0;
+    return disable("could not load \"" + path + "\": " + e.what());
   }
+
+  m_device_desc = describe_device(m_delegate);
+  if (m_delegate == "cuda" && !m_cuda_archs.empty()) {
+    // SASS for sm_XY runs on sm_XZ (Z >= Y); otherwise the driver JIT-compiles
+    // the embedded PTX, which works but makes the first load slower.
+    const int cc = nn::cuda_device_info().cc;
+    bool native = false;
+    for (int a : m_cuda_archs)
+      native |= (a / 10 == cc / 10) && (a % 10 <= cc % 10);
+    if (!native)
+      log(nn::LogLevel::Info,
+          "neural: no native kernels for sm_" + std::to_string(cc) +
+              " in this model; the NVIDIA driver compiles them on first load "
+              "(slower first load)");
+  }
+  return 0;
 }
 
-int Backend::reload() { return load(m_path); }
+int Backend::reload() { return load(m_path, m_data_override); }
+
+int Backend::prepare(const std::string &method) {
+  if (!m_loaded)
+    return 1;
+  nn::LogScope log_scope(&m_log_sink);
+  std::unique_lock<std::mutex> model_lock(m_model_mutex);
+  const auto err = m_module->load_method(method);
+  model_lock.unlock();
+  if (err != executorch::runtime::Error::Ok) {
+    log_error("neural: could not load method \"" + method + "\" of \"" +
+              m_path + "\" (error " + error_code(err) + ")");
+    if (m_delegate == "cuda" && err == executorch::runtime::Error::AccessFailed) {
+      std::error_code ec;
+      auto tmp = std::filesystem::temp_directory_path(ec);
+      if (!tmp.has_filename()) // "C:\...\Temp\" on Windows
+        tmp = tmp.parent_path();
+      log_error("neural: the CUDA runtime extracts the model's kernels to " +
+                (ec ? std::string("the temp folder") : nn::utf8_string(tmp)) +
+                "; check that the folder is writable and not blocked by "
+                "antivirus software");
+    }
+    return 1;
+  }
+  return 0;
+}
+
+std::string Backend::device_description() { return m_device_desc; }
+
+std::string Backend::delegate() { return m_delegate; }
 
 bool Backend::is_loaded() { return m_loaded; }
 
@@ -317,14 +576,14 @@ int Backend::generate(const std::string &method,
 
   auto it = m_methods.find(method);
   if (it == m_methods.end()) {
-    std::cerr << "neural: generative method \"" << method << "\" not found\n";
+    log_error("neural: generative method \"" + method + "\" not found");
     return 1;
   }
   const MethodInfo &info = it->second;
   if (input_data.size() != info.inputs.size()) {
-    std::cerr << "neural: generate(\"" << method << "\") expected "
-              << info.inputs.size() << " inputs, got " << input_data.size()
-              << "\n";
+    log_error("neural: generate(\"" + method + "\") expected " +
+              std::to_string(info.inputs.size()) + " inputs, got " +
+              std::to_string(input_data.size()));
     return 1;
   }
 
@@ -343,13 +602,15 @@ int Backend::generate(const std::string &method,
     inputs.emplace_back(*tensors.back());
   }
 
+  nn::LogScope log_scope(&m_log_sink);
   std::unique_lock<std::mutex> model_lock(m_model_mutex);
   auto result = m_module->execute(method, inputs);
   model_lock.unlock();
 
   if (!result.ok()) {
-    std::cerr << "neural: execute(\"" << method << "\") failed (error "
-              << (int)result.error() << ")\n";
+    // generate() is user-triggered, so every failure is reported.
+    log_error("neural: execute(\"" + method + "\") failed (error " +
+              error_code(result.error()) + ")");
     return 1;
   }
 
@@ -361,19 +622,37 @@ int Backend::generate(const std::string &method,
 }
 
 void Backend::reset() {
-  // Re-initialise a model's persistent internal state to zero. Safe fallback:
-  // reload the program, which re-instantiates the methods with zero-initialised
-  // mutable buffers (see EXECUTORCH_PROTOCOL.md). The caller must quiesce the
-  // worker thread first (the frontends' reload/reset messages stop it before
-  // calling).
-  // TODO: in-place zero of the named mutable buffers once the ExecuTorch 1.3.1
-  // mutable-buffer API is wired, to avoid a full reload.
+  // Re-initialise a model's persistent internal state. Each loaded method is
+  // unloaded and loaded again, which re-instantiates it with freshly
+  // initialised mutable buffers (see EXECUTORCH_PROTOCOL.md) while keeping the
+  // parsed program and the open weights file. Fallback: a full reload. The
+  // caller must quiesce the worker thread first (the frontends' reload/reset
+  // messages stop it before calling).
   // Also restart the per-input noise streams so reset replays the same seeded
-  // noise deterministically (a reload re-runs load_metadata, which already flags
-  // this; set it here too for the in-place path above).
+  // noise deterministically (a reload re-runs load_metadata, which already
+  // flags this; set it here too for the in-place path).
   m_reseed_noise.store(true, std::memory_order_release);
-  if (m_loaded)
-    reload();
+  if (!m_loaded)
+    return;
+  {
+    nn::LogScope log_scope(&m_log_sink);
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    bool ok = true;
+    for (const auto &name : m_available_methods) {
+      if (!m_module->is_method_loaded(name))
+        continue; // never run: still in its initial state
+      m_module->unload_method(name);
+      if (m_module->load_method(name) != executorch::runtime::Error::Ok) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok)
+      return;
+  }
+  log(nn::LogLevel::Warning,
+      "neural: in-place reset failed, reloading \"" + m_path + "\"");
+  reload();
 }
 
 void Backend::perform(std::vector<float *> in_buffer,
@@ -398,7 +677,7 @@ void Backend::perform(std::vector<float *> in_buffer,
       break;
     }
   if (!sig) {
-    std::cerr << "neural: method \"" << method << "\" has no signal input\n";
+    log_block_error("neural: method \"" + method + "\" has no signal input");
     return;
   }
 
@@ -409,8 +688,9 @@ void Backend::perform(std::vector<float *> in_buffer,
   const int t_out = n_vec / out_ratio;
 
   if ((int)in_buffer.size() != in_dim * n_batches) {
-    std::cerr << "neural: bad in_buffer size, expected " << in_dim * n_batches
-              << " buffers, got " << in_buffer.size() << "!\n";
+    log_block_error("neural: bad in_buffer size, expected " +
+                    std::to_string(in_dim * n_batches) + " buffers, got " +
+                    std::to_string(in_buffer.size()));
     return;
   }
 
@@ -555,9 +835,9 @@ void Backend::perform(std::vector<float *> in_buffer,
             std::memcpy(buf.data() + (size_t)b * per_batch * esize, s.data,
                         per_batch * esize);
         } else {
-          std::cerr << "neural: supplied condition \"" << spec.name
-                    << "\" numel/dtype mismatch (expected " << per_batch
-                    << "), zero-filled\n";
+          log_block_error("neural: supplied condition \"" + spec.name +
+                          "\" numel/dtype mismatch (expected " +
+                          std::to_string(per_batch) + "), zero-filled");
         }
       }
       TensorPtr t = from_blob(buf.data(), sizes, spec.dtype);
@@ -566,19 +846,24 @@ void Backend::perform(std::vector<float *> in_buffer,
       break;
     }
     default:
-      std::cerr << "neural: input \"" << spec.name
-                << "\" has a role unsupported by neural.live~ (buffer is gen-only)\n";
+      log_block_error("neural: input \"" + spec.name +
+                      "\" has a role unsupported by neural.live~ (buffer is "
+                      "gen-only)");
       return;
     }
   }
 
+  // ExecuTorch's own messages follow the same once-per-load rule as ours.
+  static const nn::LogSink drop = [](nn::LogLevel, const std::string &) {};
+  nn::LogScope log_scope(
+      m_exec_error_logged.load(std::memory_order_relaxed) ? &drop : &m_log_sink);
   std::unique_lock<std::mutex> model_lock(m_model_mutex);
   auto result = m_module->execute(method, m_inputs);
   model_lock.unlock();
 
   if (!result.ok()) {
-    std::cerr << "neural: execute(\"" << method << "\") failed (error "
-              << (int)result.error() << ")\n";
+    log_block_error("neural: execute(\"" + method + "\") failed (error " +
+                    error_code(result.error()) + ")");
     return;
   }
 
@@ -588,14 +873,15 @@ void Backend::perform(std::vector<float *> in_buffer,
   const int out_n_vec = output.size(2);
 
   if (out_batches * out_channels != (int)out_buffer.size()) {
-    std::cerr << "neural: bad out_buffer size, expected "
-              << out_batches * out_channels << " buffers, got "
-              << out_buffer.size() << "!\n";
+    log_block_error("neural: bad out_buffer size, expected " +
+                    std::to_string(out_batches * out_channels) +
+                    " buffers, got " + std::to_string(out_buffer.size()));
     return;
   }
   if (out_n_vec != t_out) {
-    std::cerr << "neural: model output size inconsistent, expected " << t_out
-              << " samples, got " << out_n_vec << "!\n";
+    log_block_error("neural: model output size inconsistent, expected " +
+                    std::to_string(t_out) + " samples, got " +
+                    std::to_string(out_n_vec));
     return;
   }
 

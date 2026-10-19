@@ -15,35 +15,55 @@ if (APPLE)
     message("CMAKE_OSX_ARCHITECTURES: ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
-# Find the ExecuTorch 1.3.1 runtime and define nn_link_executorch().
+# Package version: single source of truth is pyproject.toml (the Python
+# exporter's version); every external is stamped with it (-DVERSION).
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../pyproject.toml" _nn_version_line
+     REGEX "^version *= *\"[^\"]+\"" LIMIT_COUNT 1)
+string(REGEX REPLACE "^version *= *\"([^\"]+)\".*" "\\1" NN_VERSION "${_nn_version_line}")
+if(NOT NN_VERSION)
+    message(FATAL_ERROR "Could not read `version = \"...\"` from ../pyproject.toml")
+endif()
+message(STATUS "neural_tilde version ${NN_VERSION}")
+
+# Windows: the dynamic MSVC runtime (/MD) everywhere. ExecuTorch, the CUDA
+# shims, the inductor-compiled CUDA kernels and Rust all use it, and Max.exe
+# itself depends on it, so it is present wherever Max runs.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+
+# Find the ExecuTorch runtime and define nn_link_executorch() /
+# nn_frontend_settings().
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/nn_executorch.cmake)
 
-add_subdirectory(backend) # DEEP LEARNING BACKEND (ExecuTorch)
-
-# Text tokenizer for generative models (neural.gen~). Fetches tokenizers-cpp,
-# which builds a Rust core via cargo (`brew install rust`). Off => signal-only,
-# Rust-free build. The Rust core links statically into the .mxo.
+# Text tokenizer for generative models (neural.tokenizer, gen_cli). Fetches
+# tokenizers-cpp, which builds a Rust core via cargo (macOS: `brew install
+# rust`; Windows: `winget install Rustlang.Rustup`). Off => Rust-free build
+# without those two. The Rust core links statically.
 option(NN_ENABLE_TOKENIZER "Build the tokenizers-cpp text tokenizer (requires cargo/rustc)" ON)
+
+add_subdirectory(backend) # DEEP LEARNING BACKEND (ExecuTorch)
+# Generative core (gen_runner: backend only, no tokenizer/Rust) for neural.gen~;
+# its text->audio CLI (gen_cli) is added only with the tokenizer.
+add_subdirectory(generative)
+
 if(NN_ENABLE_TOKENIZER)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/nn_tokenizers.cmake)
     add_subdirectory(tokenizer)
-    add_subdirectory(generative) # host orchestration + gen_cli (needs the tokenizer)
 endif()
 
-# macOS only. Windows is dropped; the Pd external is not yet migrated to ExecuTorch.
-if(APPLE)
+# Max externals: macOS (.mxo) and Windows (.mxe64). The Pd external is not yet
+# migrated to ExecuTorch.
+if(APPLE OR WIN32)
     add_subdirectory(frontend/maxmsp/neural.live_tilde)     # MAX MSP EXTERNAL
     add_subdirectory(frontend/maxmsp/mc.neural.live_tilde)  # MAX MSP EXTERNAL
     add_subdirectory(frontend/maxmsp/mcs.neural.live_tilde) # MAX MSP EXTERNAL
-    # Pure Max/Jitter helper (uniform->N(0,1) probit). No ExecuTorch/Rust, so it
-    # lives outside the tokenizer guard.
+    # Pure Max/Jitter helper (uniform->N(0,1) probit). No ExecuTorch/Rust.
     add_subdirectory(frontend/maxmsp/neural.gaussianize)
     # Pure Max helper: reads a model .json metadata file and emits its contents
-    # as a Max dictionary. No ExecuTorch/Rust, so it also lives outside the guard.
+    # as a Max dictionary. No ExecuTorch/Rust.
     add_subdirectory(frontend/maxmsp/neural.info)
+    # Generative latent-diffusion runner (needs gen_runner = backend only).
+    add_subdirectory(frontend/maxmsp/neural.gen_tilde)
     if(NN_ENABLE_TOKENIZER)
-        # Generative latent-diffusion runner (needs gen_runner = backend only).
-        add_subdirectory(frontend/maxmsp/neural.gen_tilde)
         # Text tokenizer object (needs the tokenizer/Rust). Emits a dictionary
         # (input_ids + attention_mask) for neural.gen~.
         add_subdirectory(frontend/maxmsp/neural.tokenizer)

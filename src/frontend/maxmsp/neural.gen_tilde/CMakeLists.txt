@@ -6,6 +6,7 @@ cmake_minimum_required(VERSION 3.24)
 
 set(C74_MIN_API_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../min-api)
 include(${C74_MIN_API_DIR}/script/min-pretarget.cmake)
+nn_frontend_pretarget()             # dynamic MSVC runtime (see nn_executorch.cmake)
 
 if (APPLE)
 	set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum OS X deployment version" FORCE)
@@ -20,9 +21,6 @@ include_directories(
 )
 
 set(SOURCE_FILES neural.gen_tilde.cpp)
-
-set(VERSION "0.0.5")
-add_definitions(-DVERSION="${VERSION}")
 
 add_library(
 	${PROJECT_NAME}
@@ -42,6 +40,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 endif()
 
 include(${C74_MIN_API_DIR}/script/min-posttarget.cmake)
+nn_frontend_settings(${PROJECT_NAME})  # VERSION + MSVC flags
 
 # min-posttarget forces CXX_STANDARD 17; override AFTER it because
 # neural.gen_tilde.cpp uses <semaphore> (C++20).

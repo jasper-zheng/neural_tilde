@@ -187,11 +187,11 @@ bool gaussianize::ensure_outmat(mx::t_jit_matrix_info want) {
 void gaussianize::receive_matrix(symbol name) {
   void *in = mx::jit_object_findregistered((mx::t_symbol *)name);
   if (!in) {
-    cerr << "matrix '" << std::string(name) << "' not found" << endl;
+    cerr << "matrix '" << std::string(name.c_str()) << "' not found" << endl;
     return;
   }
   if (mx::object_classname((mx::t_object *)in) != mx::_jit_sym_jit_matrix) {
-    cerr << "'" << std::string(name) << "' is not a jit_matrix" << endl;
+    cerr << "'" << std::string(name.c_str()) << "' is not a jit_matrix" << endl;
     return;
   }
 
@@ -258,7 +258,7 @@ void gaussianize::receive_matrix(symbol name) {
   if (!(is_f32 || is_f64))
     cerr << "matrix must be float32 or float64 - ignored" << endl;
   else if (!inbp)
-    cerr << "matrix '" << std::string(name) << "' has no data - ignored" << endl;
+    cerr << "matrix '" << std::string(name.c_str()) << "' has no data - ignored" << endl;
   else if (ok)
     m_matrix_out.send("jit_matrix", m_outname);
 }

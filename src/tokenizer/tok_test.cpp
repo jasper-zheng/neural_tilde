@@ -7,6 +7,7 @@
 // pad_token="<pad>", side="right" (the SA3 t5gemma contract).
 
 #include "tokenizer.h"
+#include "nn_platform.h" // UTF-8 argv and paths
 
 #include "../backend/json.hpp"
 
@@ -26,11 +27,12 @@ int main(int argc, char **argv) {
         argv[0]);
     return 2;
   }
-  std::string tok_path = argv[1];
-  std::string golden_path = argv[2];
-  int max_length = argc > 3 ? std::atoi(argv[3]) : 256;
-  std::string pad_token = argc > 4 ? argv[4] : "<pad>";
-  std::string padding_side = argc > 5 ? argv[5] : "right";
+  const std::vector<std::string> args = nn::utf8_args(argc, argv);
+  std::string tok_path = args[1];
+  std::string golden_path = args[2];
+  int max_length = argc > 3 ? std::atoi(args[3].c_str()) : 256;
+  std::string pad_token = argc > 4 ? args[4] : "<pad>";
+  std::string padding_side = argc > 5 ? args[5] : "right";
 
   NnTokenizer tok;
   if (!tok.load(tok_path)) {
@@ -39,7 +41,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::ifstream f(golden_path);
+  std::ifstream f(nn::fs_path(golden_path));
   if (!f) {
     std::fprintf(stderr, "FAIL: could not open %s\n", golden_path.c_str());
     return 1;

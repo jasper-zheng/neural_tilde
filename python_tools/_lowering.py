@@ -4,7 +4,11 @@ These are delegate/partitioner utilities used by both the audio-rate exporter
 (:class:`neural_tilde.LiveModule`, ``neural.live~``) and the generative exporter
 (:class:`neural_tilde.GenModule`, ``neural.gen~``)."""
 
+import contextlib
+import logging
 import os
+import shutil
+import tempfile
 from typing import Optional
 
 
@@ -145,17 +149,24 @@ def _make_partitioner(delegate: str, coreml_disable_weight_sharing: bool = False
         return [MetalPartitioner([
             MetalBackend.generate_method_name_compile_spec(name),
             CompileSpec("codesign_identity", b"-")])]  # ad-hoc sign the embedded .so
-    raise ValueError(f"unknown delegate '{delegate}' "
-                     "(expected 'xnnpack', 'coreml', 'mlx', 'mps', 'metal', or 'portable')")
+    if delegate == "cuda":
+        # CUDA (AOTInductor, Windows x64 + NVIDIA). Like Metal, the whole graph of each method
+        # is compiled at export (Triton kernels + a DLL embedded in the .pte, weights in an
+        # external .ptd), one partitioner per method. See _cuda_lowering.py.
+        from ._cuda_lowering import make_cuda_partitioner
+        return make_cuda_partitioner(method_name or "forward")
+    raise ValueError(f"unknown delegate '{delegate}' (expected 'xnnpack', 'coreml', 'mlx', "
+                     "'mps', 'metal', 'cuda', or 'portable')")
 
 
 # ------------------------------------------------------------------- AOTInductor delegates
 # Delegates that compile each method as one whole graph with AOTInductor. They differ from
-# the op-handler backends in three ways the exporters must honour: one partitioner per method
+# the op-handler backends in ways the exporters must honour: one partitioner per method
 # (keyed on its method-name compile spec), extra per-method graph transforms before lowering,
-# and a one-time environment setup for the AOTI compile/link step.
+# a setup context around the AOTI compile/link step, edge-config overrides, and extra
+# metadata fields.
 
-_AOTI_DELEGATES = ("metal",)
+_AOTI_DELEGATES = ("metal", "cuda")
 
 
 def _is_aoti_delegate(delegate: str) -> bool:
@@ -177,14 +188,66 @@ def _aoti_graph_transforms(delegate: str) -> list:
     (empty for non-AOTI delegates). Exporters append these after any user transforms."""
     if delegate == "metal":
         return _metal_graph_transforms()
+    if delegate == "cuda":
+        from ._cuda_lowering import decompose_convs, pin_factory_devices
+        return [pin_factory_devices, decompose_convs]
     return []
 
 
-def _aoti_prepare(delegate: str) -> None:
-    """One-time environment setup before lowering for an AOTInductor delegate (no-op
-    otherwise)."""
+@contextlib.contextmanager
+def _aoti_lowering(delegate: str):
+    """Wrap ``to_edge_transform_and_lower`` for an AOTInductor delegate: Metal's link env,
+    CUDA's preflight + scoped compile patches (restored on exit). No-op otherwise."""
     if delegate == "metal":
         _metal_setup_link_env()
+    if delegate == "cuda":
+        from ._cuda_lowering import cuda_lowering
+        with cuda_lowering():
+            yield
+        return
+    yield
+
+
+def _aoti_edge_config(delegate: str) -> dict:
+    """Extra ``EdgeCompileConfig`` kwargs the delegate needs (upstream's CUDA exports skip IR
+    validity and dim-order checks)."""
+    if delegate == "cuda":
+        return {"_check_ir_validity": False, "_skip_dim_order": True}
+    return {}
+
+
+def _aoti_metadata(delegate: str) -> dict:
+    """Extra metadata JSON fields for the delegate (CUDA: target platform + GPU archs)."""
+    if delegate == "cuda":
+        from ._cuda_lowering import cuda_metadata
+        return cuda_metadata()
+    return {}
+
+
+def _write_program(pte_path: str, executorch_program) -> Optional[str]:
+    """Write the ``.pte`` and, if the program stores data externally (CUDA weights), its
+    ``.ptd`` beside it named after the model (``<name>.ptd``). Returns the ``.ptd`` file name
+    for the metadata's ``data_file``, or None when there is no external data."""
+    with open(pte_path, "wb") as f:
+        f.write(executorch_program.buffer)
+    logging.info(f"Wrote ExecuTorch program to {pte_path}")
+    if not hasattr(executorch_program, "write_tensor_data_to_file"):
+        return None
+    out_dir = os.path.dirname(os.path.abspath(pte_path))
+    tmp = tempfile.mkdtemp(prefix=".ptd_", dir=out_dir)
+    try:
+        executorch_program.write_tensor_data_to_file(outdir=tmp)
+        ptds = [f for f in os.listdir(tmp) if f.endswith(".ptd")]
+        if not ptds:
+            return None
+        if len(ptds) > 1:
+            raise RuntimeError(f"expected one external data file, got {ptds}")
+        data_file = os.path.splitext(os.path.basename(pte_path))[0] + ".ptd"
+        os.replace(os.path.join(tmp, ptds[0]), os.path.join(out_dir, data_file))
+        logging.info(f"Wrote external data to {os.path.join(out_dir, data_file)}")
+        return data_file
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # --------------------------------------------------------------------- Metal (AOTInductor)

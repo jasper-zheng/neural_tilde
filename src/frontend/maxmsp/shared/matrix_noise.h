@@ -60,12 +60,12 @@ inline bool read_jit_matrix(const c74::min::atoms &args, const MatrixNoise &nz,
   c74::min::symbol msym = args[0];
   void *mat = c74::max::jit_object_findregistered((c74::max::t_symbol *)msym);
   if (!mat) {
-    err << "matrix '" << std::string(msym) << "' not found" << c74::min::endl;
+    err << "matrix '" << std::string(msym.c_str()) << "' not found" << c74::min::endl;
     return false;
   }
   if (c74::max::object_classname((c74::max::t_object *)mat) !=
       c74::max::_jit_sym_jit_matrix) {
-    err << "'" << std::string(msym) << "' is not a jit_matrix" << c74::min::endl;
+    err << "'" << std::string(msym.c_str()) << "' is not a jit_matrix" << c74::min::endl;
     return false;
   }
 

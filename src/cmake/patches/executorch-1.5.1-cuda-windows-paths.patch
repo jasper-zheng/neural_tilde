@@ -1,0 +1,108 @@
+diff --git a/backends/cuda/runtime/cuda_backend.cpp b/backends/cuda/runtime/cuda_backend.cpp
+index 0f63f662c8..44ac774b65 100644
+--- a/backends/cuda/runtime/cuda_backend.cpp
++++ b/backends/cuda/runtime/cuda_backend.cpp
+@@ -15,6 +15,7 @@
+ #include <executorch/runtime/core/exec_aten/util/scalar_type_util.h>
+ #include <executorch/runtime/core/exec_aten/util/tensor_util.h>
+ #include <cctype>
++#include <cstdint>
+ #include <cstdio>
+ 
+ #include <array>
+@@ -345,12 +346,27 @@ class ET_EXPERIMENTAL CudaBackend final
+     // traversal and cross-key collisions. Uniqueness comes from the pid
+     // (across processes) and an atomic counter (within a process, since two
+     // identical CUDA partitions would otherwise clobber each other's .so).
++    // The counter is per module: a host that links this backend statically
++    // into several modules of one process (e.g. plugins) has one counter per
++    // module, so the counter's address tells the modules apart. Without it,
++    // the second module overwrites the first one's loaded (on Windows,
++    // locked) library.
+     static std::atomic<uint64_t> so_file_counter{0};
++    char module_tag[2 * sizeof(uintptr_t) + 1];
++    snprintf(
++        module_tag,
++        sizeof(module_tag),
++        "%llx",
++        static_cast<unsigned long long>(
++            reinterpret_cast<uintptr_t>(&so_file_counter)));
+     filesystem::path temp_dir = filesystem::temp_directory_path();
+     filesystem::path so_path = temp_dir /
+-        ("executorch_cuda_" + to_string(get_process_id()) + "_" +
++        ("executorch_cuda_" + to_string(get_process_id()) + "_" + module_tag +
++         "_" +
+          to_string(so_file_counter.fetch_add(1, std::memory_order_relaxed)) +
+          ".so");
++    // For log messages: c_str() is wchar_t on Windows.
++    const std::string so_path_utf8 = so_path.u8string();
+ 
+     // Create a temporary file
+     ofstream outfile(so_path, ios::binary);
+@@ -360,14 +376,17 @@ class ET_EXPERIMENTAL CudaBackend final
+         Info,
+         "Writing %zu bytes to %s",
+         aoti_dso_buffer->size(),
+-        so_path.c_str());
++        so_path_utf8.c_str());
+ 
+     outfile.write(
+         static_cast<const char*>(aoti_dso_buffer->data()),
+         aoti_dso_buffer->size());
+ 
+     ET_CHECK_OR_RETURN_ERROR(
+-        outfile, AccessFailed, "Failed to write to file %s", so_path.c_str());
++        outfile,
++        AccessFailed,
++        "Failed to write to file %s",
++        so_path_utf8.c_str());
+ 
+     // Finish writing the file to disk
+     outfile.close();
+@@ -386,7 +405,9 @@ class ET_EXPERIMENTAL CudaBackend final
+     // Create handle and load function pointers into it
+     cuda::CudaDelegateHandle* handle = new cuda::CudaDelegateHandle();
+     handle->so_handle = lib_handle;
+-    handle->so_path = so_path.string();
++    // UTF-8, not string(): on Windows that converts to the ANSI code page and
++    // throws for a %TEMP% it can't represent.
++    handle->so_path = so_path.u8string();
+     handle->method_name = method_name;
+ 
+     // Load function pointers specific to this handle's shared library
+@@ -961,7 +982,10 @@ class ET_EXPERIMENTAL CudaBackend final
+     // TODO(gasoonjia): Find a proper solution for safe container deletion.
+     // AOTInductorModelContainerDelete(handle->container_handle);
+ 
+-    // Remove the temporary shared library file
++    // Remove the temporary shared library file. Not on Windows: the library
++    // stays loaded (see above), and a loaded DLL can't be deleted there, so
++    // the attempt always fails; the host removes stale files instead.
++#ifndef _WIN32
+     if (!handle->so_path.empty()) {
+       std::error_code remove_error;
+       std::filesystem::remove(handle->so_path, remove_error);
+@@ -971,6 +995,7 @@ class ET_EXPERIMENTAL CudaBackend final
+           handle->so_path.c_str(),
+           remove_error.message().c_str());
+     }
++#endif
+ 
+     delete handle;
+ 
+diff --git a/backends/cuda/runtime/platform/platform.cpp b/backends/cuda/runtime/platform/platform.cpp
+index 94832617de..dbdc318083 100644
+--- a/backends/cuda/runtime/platform/platform.cpp
++++ b/backends/cuda/runtime/platform/platform.cpp
+@@ -60,8 +60,10 @@ namespace cuda {
+ executorch::runtime::Result<void*> load_library(
+     const std::filesystem::path& path) {
+ #ifdef _WIN32
++  // Load through the wide path: LoadLibraryA would read the UTF-8 bytes in the
++  // ANSI code page, so a non-ASCII %TEMP% (e.g. an accented user name) fails.
+   std::string utf8 = path.u8string();
+-  auto lib_handle = LoadLibrary(utf8.c_str());
++  auto lib_handle = LoadLibraryW(path.c_str());
+   if (lib_handle == NULL) {
+     const DWORD err = GetLastError();
+     ET_LOG(

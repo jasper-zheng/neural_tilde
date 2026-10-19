@@ -6,15 +6,19 @@
 //       output, tokenizer), build ZERO-filled inputs of the right dtype/shape,
 //       run generate(), and report output stats (shape, finite, range).
 //
-//   ./gen_smoke_test <model.pte> <method> --io <dir>
+//   ./gen_smoke_test <model.pte> <method> [--data <model.ptd>] --io <dir>
 //       Parity gate: read one raw little-endian blob per input from
 //       <dir>/<input-name>.bin (dtype/shape from the metadata), run generate(),
 //       and compare the audio output against <dir>/audio_ref.bin. PASS if
 //       max|Δ| <= 1e-4 (the protocol's C++-vs-Python-.pte gate, §7.6).
 //
-// Exercises the same Backend::generate() path neural.gen~ will use, without Max.
+// The weights file (.ptd) is resolved by Backend from the metadata unless --data
+// overrides it. Exercises the same Backend::generate() path neural.gen~ will
+// use, without Max. Exit status: 0 ok, 1 failure, 3 model disabled (the
+// load-time guards refused it; the reason is logged).
 
 #include "backend.h"
+#include "nn_platform.h"
 
 #include <algorithm>
 #include <cmath>
@@ -73,7 +77,7 @@ static std::string shape_str(const std::vector<int> &shape) {
 }
 
 static std::vector<char> read_bytes(const std::string &path) {
-  std::ifstream f(path, std::ios::binary | std::ios::ate);
+  std::ifstream f(nn::fs_path(path), std::ios::binary | std::ios::ate);
   std::vector<char> v;
   if (!f)
     return v;
@@ -85,30 +89,41 @@ static std::vector<char> read_bytes(const std::string &path) {
 }
 
 int main(int argc, char **argv) {
-  if (argc < 2) {
+  const std::vector<std::string> args = nn::utf8_args(argc, argv);
+  if (args.size() < 2) {
     std::fprintf(stderr,
-                 "usage: %s <model.pte> [method] [--io <dir>]\n", argv[0]);
+                 "usage: %s <model.pte> [method] [--data <ptd>] [--io <dir>]\n",
+                 argv[0]);
     return 2;
   }
-  std::string path = argv[1];
-  std::string method = (argc > 2 && argv[2][0] != '-') ? argv[2] : "forward";
+  std::string path = args[1];
+  std::string method =
+      (args.size() > 2 && args[2][0] != '-') ? args[2] : "forward";
   bool io_mode = false;
-  std::string io_dir;
-  for (int i = 2; i < argc; i++) {
-    if (std::string(argv[i]) == "--io" && i + 1 < argc) {
+  std::string io_dir, data_path;
+  for (size_t i = 2; i < args.size(); i++) {
+    if (args[i] == "--io" && i + 1 < args.size()) {
       io_mode = true;
-      io_dir = argv[i + 1];
+      io_dir = args[i + 1];
+    } else if (args[i] == "--data" && i + 1 < args.size()) {
+      data_path = args[i + 1];
     }
   }
 
   Backend backend;
-  if (backend.load(path)) {
+  if (backend.load(path, data_path)) {
     std::fprintf(stderr, "FAIL: load(\"%s\") returned error\n", path.c_str());
     return 1;
   }
+  if (!backend.is_loaded()) {
+    std::fprintf(stderr, "DISABLED: \"%s\" cannot run here (see above)\n",
+                 path.c_str());
+    return 3;
+  }
 
-  std::printf("loaded: %s\n  generative=%d\n", path.c_str(),
-              (int)backend.is_generative());
+  std::printf("loaded: %s\n  generative=%d  device: %s (delegate %s)\n",
+              path.c_str(), (int)backend.is_generative(),
+              backend.device_description().c_str(), backend.delegate().c_str());
   if (!backend.is_generative()) {
     std::fprintf(stderr,
                  "FAIL: \"%s\" is not a generative model (use et_smoke_test)\n",
@@ -117,6 +132,11 @@ int main(int argc, char **argv) {
   }
   if (!backend.has_method(method)) {
     std::fprintf(stderr, "FAIL: method \"%s\" not found\n", method.c_str());
+    return 1;
+  }
+  if (backend.prepare(method)) {
+    std::fprintf(stderr, "FAIL: prepare(\"%s\") returned error\n",
+                 method.c_str());
     return 1;
   }
 

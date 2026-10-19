@@ -41,3 +41,6 @@ neural-tilde-migrate = "neural_tilde.migrate:main"   # migrate.py already has ma
 [tool.setuptools]
 packages = ["neural_tilde"]
 package-dir = { neural_tilde = "python_tools" }      # mirrors old setup.py mapping exactly
+
+[tool.setuptools.package-data]
+neural_tilde = ["data/*.lib"]                        # aoti_cuda_shims.lib for delegate="cuda"

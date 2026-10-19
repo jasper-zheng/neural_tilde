@@ -4,6 +4,7 @@
 #include "../shared/cond_label.h"   // cond_inlet_label
 #include "../shared/matrix_noise.h" // MatrixNoise, detect_matrix_noise, read_jit_matrix
 #include "../shared/neural_common.h"
+#include "../shared/runtime_console.h" // console sink, prepare_and_report
 #include "c74_min.h"
 #include <algorithm>
 #include <atomic>
@@ -47,6 +48,10 @@ public:
   // BACKEND RELATED MEMBERS
   std::unique_ptr<Backend> m_model;
   bool m_is_backend_init = false;
+  // The program is loaded and m_method is ready to run (prepared at load).
+  // Gates enable_model and the audio callback.
+  std::atomic<bool> m_prepared{false};
+  void new_backend(); // a fresh m_model posting to this object's console
   std::string m_method;
   // Absolute path to the model's .pte program (derived from its .json metadata via
   // resolve_model_pte; the .pte itself may be absent — see backend load()).
@@ -164,7 +169,7 @@ public:
         description{"Enable / disable tensor computation"},
         setter{
             [this](const c74::min::atoms &args, const int inlet) -> c74::min::atoms {
-                if (m_is_backend_init && m_model->is_loaded() && args[0]){
+                if (m_is_backend_init && m_prepared && args[0]){
                     return {true};
                 } else {
                     return {false};
@@ -192,33 +197,37 @@ public:
 
     static void model_perform_loop(live *nn_instance);
     
-    message<> reload_m {this, "reload", "Reload a model",
+    message<> reload_m {this, "reload", "Reload the model, or load another one: reload [path]",
         MIN_FUNCTION {
             
-            if (args.size() != 1) {
-                cerr << "wrong number of argments" << endl;
+            if (args.size() > 1) {
+                cerr << "usage: reload [path]" << endl;
                 return {};
             }
-            if (args.size() == 1) {
-                if (args[0].a_type == 3){
+            if (args.empty() && m_path.empty()) {
+                cerr << "no model to reload" << endl;
+                return {};
+            }
+            if (args.empty() || args[0].a_type == 3) {
+                    std::string path = m_path; // bare `reload`: the current model
+                    if (!args.empty()) {
+                        // Resolve the metadata and derive the sibling .pte (which may
+                        // be absent — load() then keeps metadata-only, model disabled).
+                        path = resolve_model_pte(std::string(args[0]));
+                        if (path.empty()) {
+                            cerr << "could not find model .json metadata for "
+                                 << std::string(args[0]) << endl;
+                            return {};
+                        }
+                    }
+                    m_prepared = false; // the audio callback outputs silence from here
                     m_should_stop_perform_thread = true;
                     if (m_compute_thread)
                       m_compute_thread->join();
+                    m_compute_thread.reset();
                     
-                    try {
-//                        m_model.reset();
-                        m_model = std::make_unique<Backend>();
-                    } catch (...) {
-                        }
-                    // Resolve the metadata and derive the sibling .pte (which may
-                    // be absent — load() then keeps metadata-only, model disabled).
-                    m_path = resolve_model_pte(std::string(args[0]));
-                    if (m_path.empty()) {
-                        cerr << "could not find model .json metadata for "
-                             << std::string(args[0]) << endl;
-                        error();
-                        return {};
-                    }
+                    new_backend();
+                    m_path = path;
                     try {
                         if (m_model->load(m_path)) {
                             cerr << "error during loading" << endl;
@@ -232,6 +241,9 @@ public:
                         cerr << "no .pte program is loaded, inference is disabled"
                              << endl;
                     }
+                    if (m_model->is_loaded() && m_model->has_method(m_method))
+                        m_prepared = prepare_and_report(
+                            *m_model, m_method, m_path, (c74::max::t_object *)(*this));
                     
                     try {
                         m_higher_ratio = m_model->get_higher_ratio();
@@ -266,8 +278,6 @@ public:
                     cerr << "argument should be a path" << endl;
                     return {};
                 }
-            }
-            cout << "neural.live~ setup finished" << endl;
             return {};
         }
     };
@@ -281,6 +291,7 @@ public:
         cout << "neural.live~ " << VERSION << " - " << NN_ENGINE_NAME
              << " - July-2026 - Jasper Shuoyang Zheng " << endl;
         cout << "docs: https://github.com/jasper-zheng/neural_tilde" << endl;
+        install_default_console_sink();
         return {};
       }};
 
@@ -337,9 +348,7 @@ public:
         // doesn't route to them natively (the inspector / @box-args reach them
         // directly) — this catch-all backs the bare `<name> <value>` form.
         std::string sel = args[0];
-        if (sel == "reload") {
-          m_model->reload();
-        } else if (sel == "get_methods") {
+        if (sel == "get_methods") {
           for (std::string method : m_model->get_available_methods())
             cout << method << endl;
         } else if (is_attr(sel) && args.size() >= 2) {
@@ -391,7 +400,7 @@ live::live(const atoms &args)
       m_use_thread(true), m_data_available_lock(0), m_result_available_lock(1),
       m_should_stop_perform_thread(false) {
 
-  m_model = std::make_unique<Backend>();
+  new_backend();
   m_is_backend_init = true;
 
   // CHECK ARGUMENTS
@@ -442,6 +451,12 @@ live::live(const atoms &args)
   m_in_ratio = params[1];
   m_out_dim = params[2];
   m_out_ratio = params[3];
+
+  // Load the method now, so its setup (CUDA kernels, weights) isn't paid by the
+  // first audio block.
+  if (m_model->is_loaded())
+    m_prepared = prepare_and_report(*m_model, m_method, m_path,
+                                    (c74::max::t_object *)(*this));
 
   // Resolve the model's condition-role inputs (their names/dtypes/sizes) so the
   // ctor can give each its own control inlet and perform() can bind them.
@@ -521,6 +536,11 @@ live::live(const atoms &args)
 
   if (m_use_thread)
     m_compute_thread = std::make_unique<std::thread>(model_perform_loop, this);
+}
+
+void live::new_backend() {
+  m_model = std::make_unique<Backend>();
+  m_model->set_log_sink(max_console_sink((c74::max::t_object *)(*this)));
 }
 
 live::~live() {
@@ -640,17 +660,17 @@ void live::operator()(audio_bundle input, audio_bundle output) {
   auto dsp_vec_size = output.frame_count();
 
   // CHECK IF MODEL IS LOADED AND ENABLED
-  if (!m_model->is_loaded() || !enable) {
+  if (!m_prepared || !enable) {
     fill_with_zero(output);
     return;
   }
 
   // CHECK IF DSP_VEC_SIZE IS LARGER THAN BUFFER SIZE
   if (dsp_vec_size > m_buffer_size) {
-    cerr << "vector size (" << dsp_vec_size << ") ";
-    cerr << "larger than buffer size (" << m_buffer_size << "). ";
-    cerr << "disabling model.";
-    cerr << endl;
+    // Audio thread: Max's posting is thread-safe, min's cerr is not.
+    c74::max::object_error((c74::max::t_object *)(*this),
+                           "vector size (%d) larger than buffer size (%d), disabling model",
+                           (int)dsp_vec_size, m_buffer_size);
     enable = false;
     fill_with_zero(output);
     return;
@@ -831,7 +851,7 @@ void live::receive_dict(const atoms &args) {
     d = c74::max::dictobj_findregistered_retain((c74::max::t_symbol *)name);
     retained = true;
     if (!d) {
-      cerr << "dictionary '" << std::string(name) << "' not found" << endl;
+      cerr << "dictionary '" << std::string(name.c_str()) << "' not found" << endl;
       return;
     }
   }

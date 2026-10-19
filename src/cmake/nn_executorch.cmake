@@ -56,11 +56,29 @@ function(nn_bundle_metal_libomp target)
     COMMENT "Bundle libomp.dylib for the Metal (AOTI) delegate")
 endfunction()
 
+# --- CUDA (AOTInductor) delegate, Windows: the driver must support at least the CUDA
+# version the runtime was built with (the ET config already found CUDAToolkit). Encoded
+# like cudaDriverGetVersion (13.0 -> 13000); Backend refuses CUDA models on older drivers.
+if(TARGET aoti_cuda_backend AND CUDAToolkit_VERSION_MAJOR)
+  math(EXPR NN_CUDA_REQUIRED_VERSION
+       "${CUDAToolkit_VERSION_MAJOR} * 1000 + ${CUDAToolkit_VERSION_MINOR} * 10")
+  message(STATUS "CUDA delegate: models need a driver supporting CUDA "
+                 "${CUDAToolkit_VERSION_MAJOR}.${CUDAToolkit_VERSION_MINOR}+")
+endif()
+
 # Link `target` against the ExecuTorch runtime, CPU op kernels, and the MLX
 # delegate. The imported ET targets already carry `-force_load` via their
 # INTERFACE_LINK_OPTIONS, so op/kernel/backend static initializers register
 # without any extra whole-archive handling. Everything links statically, so the
 # only runtime artifact to ship is mlx.metallib (copied per-external, post-build).
+# Windows: XNNPACK and the CUDA delegate. Static registration survives MSVC linking
+# because the imported ET targets carry /WHOLEARCHIVE in their INTERFACE_LINK_OPTIONS
+# (the Windows counterpart of -force_load). The two CUDA runtime DLLs are copied
+# beside an executable, or for a Max external into NN_SUPPORT_DIR (default
+# <build>/support), whose contents go into the package's support/ folder, which Max
+# puts on the DLL search path.
+set(NN_SUPPORT_DIR "${CMAKE_BINARY_DIR}/support" CACHE PATH
+    "Where the Windows runtime DLLs for the Max externals are collected")
 function(nn_link_executorch target)
   target_link_libraries(${target} PRIVATE
     executorch
@@ -69,9 +87,33 @@ function(nn_link_executorch target)
     extension_data_loader
     extension_flat_tensor
     optimized_native_cpu_ops_lib   # portable/optimized ATen ops (CPU fallback)
-    "-framework Foundation"
-    "-framework Accelerate"
   )
+  if(APPLE)
+    target_link_libraries(${target} PRIVATE
+      "-framework Foundation"
+      "-framework Accelerate")
+  endif()
+  # CUDA (AOTInductor) delegate — Windows/NVIDIA. The kernels are a native library
+  # embedded in the .pte (weights in the .ptd), extracted to %TEMP% and loaded at
+  # method load; that library imports aoti_cuda_shims.dll, which imports
+  # extension_cuda.dll, so both ship beside the target.
+  if(TARGET aoti_cuda_backend)
+    target_link_libraries(${target} PRIVATE aoti_cuda_backend)
+    get_target_property(_type ${target} TYPE)
+    if(_type STREQUAL "MODULE_LIBRARY")
+      set(_dest "${NN_SUPPORT_DIR}")
+    else()
+      set(_dest "$<TARGET_FILE_DIR:${target}>")
+    endif()
+    foreach(_dll aoti_cuda_shims extension_cuda)
+      if(TARGET ${_dll})
+        add_custom_command(TARGET ${target} POST_BUILD
+          COMMAND ${CMAKE_COMMAND} -E make_directory "${_dest}"
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:${_dll}>" "${_dest}"
+          COMMENT "Copy ${_dll}.dll for ${target}")
+      endif()
+    endforeach()
+  endif()
   # MLX (Apple-Silicon GPU) delegate — fast, and DOES persist cached_conv streaming
   # state across execute() (verified bit-identical to XNNPACK on conv models incl.
   # multi-rate encoders; the old "MLX clicks" note was an untested assumption).
@@ -131,5 +173,34 @@ function(nn_link_executorch target)
     # Ship libomp beside the external + repoint its libomp dep to @rpath (runtime dep of the
     # AOTI .so). No-op if NN_LIBOMP_PATH was not resolved above.
     nn_bundle_metal_libomp(${target})
+  endif()
+endfunction()
+
+# --- Max externals (frontend/maxmsp/*) -------------------------------------------------
+# Call right after include(min-pretarget.cmake), in the external's CMakeLists (a macro, so
+# it edits that directory's scope). With the Visual Studio generator the Max SDK's
+# max-pretarget forces the static MSVC runtime (/MT) through CMAKE_<LANG>_FLAGS_<CONFIG>
+# and a directory-wide add_compile_options. Everything the externals link (ExecuTorch,
+# the CUDA shims, Rust) uses the dynamic runtime, so put back CMake's defaults; the
+# runtime then comes from CMAKE_MSVC_RUNTIME_LIBRARY (/MD, set in src/CMakeLists.txt).
+macro(nn_frontend_pretarget)
+  if(MSVC)
+    foreach(_lang C CXX)
+      set(CMAKE_${_lang}_FLAGS_DEBUG "/Zi /Ob0 /Od /RTC1")
+      set(CMAKE_${_lang}_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG")
+      set(CMAKE_${_lang}_FLAGS_MINSIZEREL "/O1 /Ob1 /DNDEBUG")
+      set(CMAKE_${_lang}_FLAGS_RELWITHDEBINFO "/Zi /O2 /Ob1 /DNDEBUG")
+    endforeach()
+    set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "")
+  endif()
+endmacro()
+
+# Call after include(min-posttarget.cmake): the package version and the MSVC settings
+# shared by every external.
+function(nn_frontend_settings target)
+  target_compile_definitions(${target} PRIVATE VERSION="${NN_VERSION}")
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /utf-8 /Zc:__cplusplus /permissive-)
+    target_compile_definitions(${target} PRIVATE NOMINMAX _USE_MATH_DEFINES)
   endif()
 endfunction()

@@ -50,6 +50,7 @@
 #include "../shared/cond_label.h"   // cond_inlet_label
 #include "../shared/matrix_noise.h" // MatrixNoise, detect_matrix_noise, read_jit_matrix
 #include "../shared/neural_common.h" // resolve_model_pte
+#include "../shared/runtime_console.h" // console sink, prepare_and_report
 #include "c74_min.h"
 
 #include <algorithm>
@@ -266,6 +267,7 @@ public:
         cout << "neural.gen~ " << VERSION << " - " << NN_ENGINE_NAME
              << " - Jasper Shuoyang Zheng" << endl;
         cout << "docs: https://github.com/jasper-zheng/neural_tilde" << endl;
+        install_default_console_sink();
         return {};
       }};
 
@@ -466,7 +468,10 @@ void gen::load_model(std::string model_path) {
     }
     m_out_spec = m_runner.output_spec(m_method);
     m_loaded = true;                      // metadata parsed: I/O is known
-    m_runnable = m_runner.runnable();     // .pte present: generation possible
+    // .pte present and the method loads: generation possible. Loading the
+    // method here keeps its setup (CUDA kernels, weights) off the first generate.
+    m_runnable = m_runner.runnable() &&
+                 prepare_and_report(m_runner, m_method, abs, (c74::max::t_object *)(*this));
     detect_matrix_noise();    // find matrix-drivable noise inputs (for attrs)
     build_condition_meta();   // re-resolve condition inlets + reset cache (reload-safe)
     add_dynamic_attributes(); // expose the model's scalar params as attributes
@@ -483,9 +488,7 @@ void gen::load_model(std::string model_path) {
         kept[bis.front()->name] = m_init_src[""];
       m_init_src.swap(kept);
     }
-    if (m_runnable) {
-      cout << "loaded " << abs << endl;
-    } else {
+    if (!m_runner.runnable()) {
       cerr << "no .pte program is loaded, generation is disabled"
            << endl;
       cout << "loaded metadata for " << abs << endl;
@@ -522,7 +525,7 @@ void gen::receive_dict(const atoms &args) {
     d = c74::max::dictobj_findregistered_retain((c74::max::t_symbol *)name);
     retained = true;
     if (!d) {
-      cerr << "dictionary '" << std::string(name) << "' not found" << endl;
+      cerr << "dictionary '" << std::string(name.c_str()) << "' not found" << endl;
       return;
     }
   }
@@ -600,6 +603,9 @@ void gen::receive_list(const atoms &args, int inlet) {
 }
 
 gen::gen(const atoms &args) {
+  // Runtime diagnostics (load errors, ExecuTorch's reason for a failed
+  // generate) go to the Max console, from the worker thread too.
+  m_runner.set_log_sink(max_console_sink((c74::max::t_object *)(*this)));
   if (args.size() > 1)
     m_method = std::string(args[1]);
   if (args.size() > 0)
@@ -721,7 +727,7 @@ void gen::snapshot_init_audio() {
     buffer_reference ref{this, nullptr, false};
     ref.set(it->second.buffer);
     if (!ref) {
-      cerr << "buffer~ '" << std::string(it->second.buffer) << "' for input '"
+      cerr << "buffer~ '" << std::string(it->second.buffer.c_str()) << "' for input '"
            << bi->name << "' not found, filling with " << bi->pad_value << endl;
       continue;
     }
@@ -730,7 +736,7 @@ void gen::snapshot_init_audio() {
     int sch = (int)b.channel_count();
     int sframes = b.valid() ? (int)b.frame_count() : 0;
     if (sframes == 0)
-      cwarn << "buffer~ '" << std::string(it->second.buffer) << "' for input '"
+      cwarn << "buffer~ '" << std::string(it->second.buffer.c_str()) << "' for input '"
             << bi->name << "' is empty, filling with " << bi->pad_value << endl;
     double ssr = b.samplerate();
     std::vector<float> src((size_t)sch * sframes);
@@ -739,7 +745,7 @@ void gen::snapshot_init_audio() {
         src[(size_t)c * sframes + t] = b.lookup((size_t)t, (size_t)c);
     const auto g = GenRunner::buffer_geometry(*bi, m_out_spec.sample_rate);
     if (!bi->resample && std::lround(ssr) != g.sr)
-      cwarn << "buffer~ '" << std::string(it->second.buffer) << "' is read 1:1 into '"
+      cwarn << "buffer~ '" << std::string(it->second.buffer.c_str()) << "' is read 1:1 into '"
             << bi->name << "'; its sample rate " << ssr
             << " Hz is ignored (declared " << g.sr << " Hz)" << endl;
     GenRunner::prepare_buffer_input(*bi, m_out_spec.sample_rate, src, sch,
@@ -826,7 +832,8 @@ void gen::trigger() {
     return;
   }
   if (!m_runnable) {
-    cerr << ".pte program is not loaded, cannot generate" << endl;
+    cerr << "the model can't run (see the load messages above), cannot generate"
+         << endl;
     return;
   }
   if (m_busy.exchange(true)) {
@@ -959,7 +966,7 @@ void gen::on_done() {
   {
     buffer_lock<false> b(m_buffer);
     if (!b.valid()) {
-      cerr << "target buffer~ '" << std::string(m_buffer.name())
+      cerr << "target buffer~ '" << std::string(m_buffer.name().c_str())
            << "' has no samples to write into" << endl;
       m_busy.store(false);
       return;
@@ -1000,7 +1007,7 @@ void gen::on_done() {
         // input with "resample": false ignores the buffer~'s rate.
         const double got = c74::max::buffer_getsamplerate(buf);
         if (std::fabs(got - (double)m_out_spec.sample_rate) > 1e-6)
-          cwarn << "buffer~ '" << std::string(m_buffer.name())
+          cwarn << "buffer~ '" << std::string(m_buffer.name().c_str())
                 << "' did not take sample rate " << m_out_spec.sample_rate
                 << " Hz (reports " << got << " Hz); the data is unchanged"
                 << endl;

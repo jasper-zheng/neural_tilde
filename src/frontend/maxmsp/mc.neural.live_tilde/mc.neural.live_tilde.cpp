@@ -1,7 +1,9 @@
 #include "../../../backend/backend.h"
 #include "../shared/circular_buffer.h"
 #include "../shared/neural_common.h"
+#include "../shared/runtime_console.h" // console sink, prepare_and_report
 #include "c74_min.h"
+#include <atomic>
 #include <chrono>
 #include <semaphore>
 #include <string>
@@ -43,6 +45,10 @@ public:
   // BACKEND RELATED MEMBERS
   std::unique_ptr<Backend> m_model;
   bool m_is_backend_init = false;
+  // The program is loaded and m_method is ready to run (prepared at load).
+  // Gates enable_model and the audio callback.
+  std::atomic<bool> m_prepared{false};
+  void reload_model(); // bare `reload`
   std::string m_method;
   std::vector<std::string> settable_attributes;
   bool has_settable_attribute(std::string attribute);
@@ -82,7 +88,7 @@ public:
         description{"Enable / disable tensor computation"},
         setter{
             [this](const c74::min::atoms &args, const int inlet) -> c74::min::atoms {
-                if (m_is_backend_init && m_model->is_loaded() && args[0]){
+                if (m_is_backend_init && m_prepared && args[0]){
                     return {true};
                 } else {
                     return {false};
@@ -116,6 +122,7 @@ public:
         cout << "mc.neural.live~ " << VERSION << " - " << NN_ENGINE_NAME
              << " - July-2026 - Jasper Shuoyang Zheng " << endl;
         cout << "docs: https://github.com/jasper-zheng/neural_tilde" << endl;
+        install_default_console_sink();
         // mc handle
         c74::max::t_class *c = args[0];
         c74::max::class_addmethod(
@@ -129,7 +136,7 @@ public:
   message<> anything{this, "anything", "callback for attributes",
                      MIN_FUNCTION{symbol attribute_name = args[0];
   if (attribute_name == "reload") {
-    m_model->reload();
+    reload_model();
   } else if (attribute_name == "get_attributes") {
     for (std::string attr : settable_attributes) {
       cout << attr << endl;
@@ -243,6 +250,7 @@ mc_live::mc_live(const atoms &args)
       m_use_thread(true), m_data_available_lock(0), m_result_available_lock(1),
       m_should_stop_perform_thread(false) {
   m_model = std::make_unique<Backend>();
+  m_model->set_log_sink(max_console_sink((c74::max::t_object *)(*this)));
   m_is_backend_init = true;
 
   // CHECK ARGUMENTS
@@ -310,6 +318,12 @@ mc_live::mc_live(const atoms &args)
   m_out_dim = params[2];
   m_out_ratio = params[3];
 
+  // Load the method now, so its setup (CUDA kernels, weights) isn't paid by the
+  // first audio block.
+  if (m_model->is_loaded())
+    m_prepared = prepare_and_report(*m_model, m_method, m_path,
+                                    (c74::max::t_object *)(*this));
+
   // Adopt the model's exported (fixed) buffer size; see neural.live_tilde.cpp ctor.
   m_buffer_size = negotiate_buffer_size(m_buffer_size, m_model->get_buffer_size(),
                                         m_higher_ratio, m_use_thread, cerr);
@@ -376,6 +390,22 @@ void mc_live::reset_buffers() {
   }
 }
 
+// Re-read the current model from disk. The worker is stopped meanwhile, so it
+// never runs against a half-loaded model.
+void mc_live::reload_model() {
+  m_prepared = false; // the audio callback outputs silence from here
+  m_should_stop_perform_thread = true;
+  if (m_compute_thread)
+    m_compute_thread->join();
+  m_compute_thread.reset();
+  if (!m_model->reload() && m_model->is_loaded())
+    m_prepared = prepare_and_report(*m_model, m_method, m_path,
+                                    (c74::max::t_object *)(*this));
+  m_should_stop_perform_thread = false;
+  if (m_use_thread)
+    m_compute_thread = std::make_unique<std::thread>(model_perform_loop, this);
+}
+
 mc_live::~mc_live() {
   m_should_stop_perform_thread = true;
   if (m_compute_thread)
@@ -395,17 +425,17 @@ void mc_live::operator()(audio_bundle input, audio_bundle output) {
   auto dsp_vec_size = output.frame_count();
 
   // CHECK IF MODEL IS LOADED AND ENABLED
-  if (!m_model->is_loaded() || !enable) {
+  if (!m_prepared || !enable) {
     fill_with_zero(output);
     return;
   }
 
   // CHECK IF DSP_VEC_SIZE IS LARGER THAN BUFFER SIZE
   if (dsp_vec_size > m_buffer_size) {
-    cerr << "vector size (" << dsp_vec_size << ") ";
-    cerr << "larger than buffer size (" << m_buffer_size << "). ";
-    cerr << "disabling model.";
-    cerr << endl;
+    // Audio thread: Max's posting is thread-safe, min's cerr is not.
+    c74::max::object_error((c74::max::t_object *)(*this),
+                           "vector size (%d) larger than buffer size (%d), disabling model",
+                           (int)dsp_vec_size, m_buffer_size);
     enable = false;
     fill_with_zero(output);
     return;
