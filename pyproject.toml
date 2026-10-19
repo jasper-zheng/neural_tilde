@@ -28,8 +28,9 @@ dependencies = ["torch>=2.12.0"]    # the ONLY hard dep (everything else is lazy
 [project.optional-dependencies]
 coreml = ["coremltools>=9.0"]       # for the CoreML partitioner path
 dev = ["build", "twine"]            # build + validate dist artifacts
-# NOTE: executorch is intentionally NOT declared -- the MLX/CoreML-capable build is from
-# source (not on PyPI); the code detects it lazily and errors helpfully when missing.
+# NOTE: executorch is intentionally NOT declared -- its version must match the runtime the
+# externals were built against (requirements.txt / requirements-cuda.txt pin it), and some
+# downstream envs use a from-source build; the code detects it lazily and errors helpfully.
 
 [project.urls]
 Homepage = "https://github.com/jasper-zheng/neural_tilde"

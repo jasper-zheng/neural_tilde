@@ -50,7 +50,7 @@ class TinyConvNet(LiveModule):
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     out = sys.argv[1] if len(sys.argv) > 1 else "tiny_stream"
-    delegate = sys.argv[2] if len(sys.argv) > 2 else "mlx"  # e.g. coreml, xnnpack, mps
+    delegate = sys.argv[2] if len(sys.argv) > 2 else "mlx"  # e.g. coreml, xnnpack, metal
 
     model = TinyConvNet()
 
@@ -74,7 +74,7 @@ def main() -> None:
     )
 
     # Lower with the chosen delegate (default "mlx"; pass a 2nd CLI arg to override,
-    # e.g. "xnnpack" for CPU, "coreml" for Apple, "mps" for Apple GPU). For coreml, pass
+    # e.g. "xnnpack" for CPU, "coreml" for Apple, "metal" for Apple GPU). For coreml, pass
     # coreml_compute_units="CPU_AND_NE"/"CPU_AND_GPU"/... to pick the unit (default "ALL").
     path = model.export_to_pte(out, delegate=delegate, buffer_size=4096, strict=True)
     print(f"wrote {path} and {path[:-4]}.json")

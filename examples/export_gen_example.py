@@ -62,7 +62,7 @@ class TinyGen(nn.Module):
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     out = sys.argv[1] if len(sys.argv) > 1 else "tiny_gen"
-    delegate = sys.argv[2] if len(sys.argv) > 2 else "coreml"  # e.g. mps, mlx, xnnpack
+    delegate = sys.argv[2] if len(sys.argv) > 2 else "coreml"  # e.g. mlx, xnnpack, metal
 
     gm = GenModule(TinyGen())
     gm.register_condition("line_ids", [1, 64], "int64")

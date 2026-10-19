@@ -1,0 +1,101 @@
+diff --git a/backends/apple/metal/runtime/ops/op_convolution.mm b/backends/apple/metal/runtime/ops/op_convolution.mm
+index eb06a8d..7a237fe 100644
+--- a/backends/apple/metal/runtime/ops/op_convolution.mm
++++ b/backends/apple/metal/runtime/ops/op_convolution.mm
+@@ -132,8 +132,12 @@ AOTITorchError aoti_torch_mps_convolution(
+         }
+       }
+ 
+-      // Get weight dimensions
+-      int64_t C_out = weight_tensor->sizes()[0];  // output channels
++      // Get weight dimensions. For a REGULAR conv the weight is [C_out, C_in/groups, kH, kW]
++      // so C_out = weight[0]. For a TRANSPOSED conv (conv_transpose) the PyTorch weight layout
++      // is [C_in, C_out/groups, kH, kW], so the true output channel count is weight[1]*groups
++      // (using weight[0] here — the old behavior — makes MPSGraph reject the channel counts).
++      int64_t C_out = transposed ? (weight_tensor->sizes()[1] * groups)
++                                 : weight_tensor->sizes()[0];  // output channels
+       int64_t kernel_h = is_conv1d ? 1 : weight_tensor->sizes()[2];  // kernel height
+       int64_t kernel_w = is_conv1d ? weight_tensor->sizes()[2] : weight_tensor->sizes()[3];  // kernel width
+ 
+@@ -215,13 +219,16 @@ AOTITorchError aoti_torch_mps_convolution(
+       }
+ 
+       ET_LOG(Debug, "aoti_torch_mps_convolution: mps_dtype=%d, element_size=%zu", mps_dtype, element_size);
+-      // Get weight's input channel dimension from the weight tensor (not from input)
+-      // For grouped convolutions, weight shape is [C_out, C_in/groups, kH, kW]
+-      int64_t weight_C_in = weight_tensor->sizes()[1];  // This handles grouped convs correctly
++      // The weight placeholder must match the ACTUAL weight tensor layout so MPSGraph reads the
++      // real buffer correctly: regular conv -> [C_out, C_in/groups, kH, kW]; transposed conv ->
++      // [C_in, C_out/groups, kH, kW]. Feed the weight tensor's own leading dims for both cases
++      // (the old code hard-wired [C_out, weight[1]], which is wrong for the transposed layout).
++      int64_t weight_d0 = weight_tensor->sizes()[0];
++      int64_t weight_d1 = weight_tensor->sizes()[1];
+ 
+       // Define tensor shapes for placeholders (needed for both cache hit and miss)
+       NSArray<NSNumber*>* inputShape = @[@(N), @(C_in), @(H_in), @(W_in)];
+-      NSArray<NSNumber*>* weightShape = @[@(C_out), @(weight_C_in), @(kernel_h), @(kernel_w)];
++      NSArray<NSNumber*>* weightShape = @[@(weight_d0), @(weight_d1), @(kernel_h), @(kernel_w)];
+ 
+       // Create cache key for this convolution
+       GraphCacheKey cache_key;
+@@ -262,7 +269,7 @@ AOTITorchError aoti_torch_mps_convolution(
+ 
+         ET_LOG(Debug, "aoti_torch_mps_convolution: Creating placeholders with shapes input:[%d,%d,%d,%d] weight:[%d,%d,%d,%d]",
+                 (int)N, (int)C_in, (int)H_in, (int)W_in,
+-                (int)C_out, (int)C_in, (int)kernel_h, (int)kernel_w);
++                (int)weight_d0, (int)weight_d1, (int)kernel_h, (int)kernel_w);
+ 
+         // Create placeholders for input tensors
+         inputPlaceholder = [mpsGraph placeholderWithShape:inputShape
+@@ -294,34 +301,32 @@ AOTITorchError aoti_torch_mps_convolution(
+         // Perform convolution using MPSGraph
+         if (transposed) {
+           ET_LOG(Debug, "aoti_torch_mps_convolution: Using transposed convolution");
+-          // For transposed convolution, we need to handle output padding
+-          int64_t output_pad_h = output_padding && output_padding_len_ > 0 ? output_padding[0] : 0;
+-          int64_t output_pad_w = output_padding && output_padding_len_ > 1 ? output_padding[1] : 0;
+-
+-          // For transposed convolution, we need to adjust the padding calculation
+-          // In transposed convolution, the effective padding is typically negative
+-          // and we use output_padding to control the final output size
+-          int64_t transposed_pad_h = pad_h - output_pad_h;
+-          int64_t transposed_pad_w = pad_w - output_pad_w;
+-
+-          // Create transposed convolution descriptor with adjusted padding
++          // A conv_transpose is the adjoint of a forward conv F. PyTorch's transposed weight
++          // [C_in, C_out/groups, kH, kW] is EXACTLY F's OIHW weight, so it feeds MPSGraph's
++          // convolutionTranspose2D directly (no permute/flip). The output size is ambiguous
++          // under striding, so we pass the explicit outputShape (H_out/W_out already fold in
++          // output_padding); the descriptor carries the ORIGINAL padding (F's padding), NOT the
++          // old (pad - output_pad) fudge — the previous code approximated the transpose with a
++          // forward convolution2D, which is wrong for stride>1 and mis-set the channel counts.
+           MPSGraphConvolution2DOpDescriptor* transposedConvDesc = [MPSGraphConvolution2DOpDescriptor descriptorWithStrideInX:stride_w
+                                                                                                                     strideInY:stride_h
+                                                                                                               dilationRateInX:dil_w
+                                                                                                               dilationRateInY:dil_h
+                                                                                                                       groups:groups
+-                                                                                                                paddingLeft:transposed_pad_w
+-                                                                                                                paddingRight:transposed_pad_w
+-                                                                                                                  paddingTop:transposed_pad_h
+-                                                                                                              paddingBottom:transposed_pad_h
++                                                                                                                paddingLeft:pad_w
++                                                                                                                paddingRight:pad_w
++                                                                                                                  paddingTop:pad_h
++                                                                                                              paddingBottom:pad_h
+                                                                                                                 paddingStyle:MPSGraphPaddingStyleExplicit
+                                                                                                                 dataLayout:MPSGraphTensorNamedDataLayoutNCHW
+                                                                                                             weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+ 
+-          convOutput = [mpsGraph convolution2DWithSourceTensor:inputPlaceholder
+-                                                    weightsTensor:weightPlaceholder
+-                                                        descriptor:transposedConvDesc
+-                                                              name:@"transposed_convolution"];
++          NSArray<NSNumber*>* transposedOutputShape = @[@(N), @(C_out), @(H_out), @(W_out)];
++          convOutput = [mpsGraph convolutionTranspose2DWithSourceTensor:inputPlaceholder
++                                                          weightsTensor:weightPlaceholder
++                                                            outputShape:transposedOutputShape
++                                                             descriptor:transposedConvDesc
++                                                                   name:@"transposed_convolution"];
+         } else {
+           ET_LOG(Debug, "aoti_torch_mps_convolution: Using regular convolution");
+           convOutput = [mpsGraph convolution2DWithSourceTensor:inputPlaceholder

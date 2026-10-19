@@ -1,72 +1,85 @@
 
 ## Build the externals from source
 
-Build the externals from source if you want to modify it.
+Build the externals from source if you want to modify it. Both platforms use **ExecuTorch 1.5.1**.
 
-- **macOS (Apple Silicon, arm64), macOS 15+:** ExecuTorch 1.3.1, see below.
-- **Windows x64 + NVIDIA CUDA:** ExecuTorch 1.5, in progress. See [Windows (CUDA)](#windows-cuda) for the runtime and the export environment.
+- **macOS (Apple Silicon, arm64), macOS 15+:** see [macOS](#macos).
+- **Windows x64 + NVIDIA CUDA:** see [Windows (CUDA)](#windows-cuda).
 
 ## macOS
 
-**Prerequisites:** 
- - **Xcode Command Line Tools** (to install: `xcode-select --install`), 
- - **CMake** (to install: `brew install cmake`), 
- - **ExecuTorch 1.3.1** runtime (see below).
- 
-<!-- If you want the MLX GPU delegate: install the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`). -->
+**Prerequisites:**
+ - **Xcode** (the full app, not only the Command Line Tools: the MLX delegate needs the Metal compiler; check with `xcrun -sdk macosx --find metal`, or install the Metal Toolchain with `xcodebuild -downloadComponent MetalToolchain`).
+ - **CMake** ≥ 3.24 (`brew install cmake`), **git**, and Python 3.12 (e.g. [uv](https://docs.astral.sh/uv/)).
+ - **Rust**, for `neural.tokenizer` (`brew install rust`).
+ - The `min-api` submodule (Max SDK): clone with `--recursive`, or run `git submodule update --init --recursive`.
 
-### 1. Build the ExecuTorch runtime (once)
+### 1. Python export environment
 
-`neural.live~` links statically to an installed **ExecuTorch 1.3.1** C++ runtime (build it once and reuse it). The commands below will: 
- - Clone ExecuTorch at tag `v1.3.1` into a directory named **exactly `executorch`**
-(it refuses other names),
- - Build and install ExecuTorch installs into `executorch/cmake-out` (**This path will be passed as `EXECUTORCH_ROOT` below**). See the [ExecuTorch build guide](https://docs.pytorch.org/executorch/) for the
-full guide.
+The PyPI `executorch` wheel for macOS arm64 includes the MLX, Core ML, Metal and XNNPACK partitioners, so no source build is needed for exporting:
 
 ```bash
-git clone -b v1.3.1 https://github.com/pytorch/executorch.git --recursive
+uv venv /path/to/nt-env --python 3.12 --python-preference only-managed
+uv pip install --python /path/to/nt-env/bin/python -r requirements.txt
+uv pip install --python /path/to/nt-env/bin/python -e . --no-deps
+```
+
+ - The `executorch` version in this environment must match the runtime the externals link (step 2).
+ - Don't base the environment on a conda Python (which is why the `uv venv` above has `--python-preference only-managed`). For `delegate="metal"`, inductor links the kernel library against the Python's `lib/`. Conda's `libc++.1.dylib` has an `@rpath` install name, so the exported `.pte` then fails to load: `Library not loaded: @rpath/libc++.1.dylib`.
+
+### 2. Build the ExecuTorch 1.5.1 runtime (once)
+
+Clone into a directory named exactly `executorch`, apply neural_tilde's Metal patch, then configure with the Python from step 1. The runtime installs into `executorch/cmake-out`, which is the `EXECUTORCH_ROOT` for step 3.
+
+```bash
+git clone -b v1.5.1 --recursive https://github.com/pytorch/executorch.git
+git -C executorch apply "$PWD/src/cmake/patches/executorch-1.5.1-metal-conv-transpose.patch"
 cd executorch
-cmake -S . -B cmake-out -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_INSTALL_PREFIX=cmake-out \
-  -DEXECUTORCH_BUILD_EXTENSION_MODULE=ON \
-  -DEXECUTORCH_BUILD_EXTENSION_TENSOR=ON \
-  -DEXECUTORCH_BUILD_EXTENSION_DATA_LOADER=ON \
-  -DEXECUTORCH_BUILD_COREML=ON \
-  -DEXECUTORCH_BUILD_XNNPACK=ON \
-  -DEXECUTORCH_BUILD_MPS=ON       # optional: Apple-GPU MPSGraph delegate (see below)
+cmake --preset mlx-release \
+  -DPYTHON_EXECUTABLE=/path/to/nt-env/bin/python \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DEXECUTORCH_BUILD_EXTENSION_MODULE=ON -DEXECUTORCH_BUILD_EXTENSION_TENSOR=ON \
+  -DEXECUTORCH_BUILD_EXTENSION_DATA_LOADER=ON -DEXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR=ON \
+  -DEXECUTORCH_BUILD_EXTENSION_NAMED_DATA_MAP=ON -DEXECUTORCH_BUILD_KERNELS_OPTIMIZED=ON \
+  -DEXECUTORCH_ENABLE_LOGGING=ON -DEXECUTORCH_LOG_LEVEL=Error \
+  -DEXECUTORCH_BUILD_COREML=ON -DEXECUTORCH_BUILD_XNNPACK=ON -DEXECUTORCH_BUILD_METAL=ON
 cmake --build cmake-out --target install -j8
 ```
-<!-- 
-> **Metal (experimental):** `-DEXECUTORCH_BUILD_METAL=ON` builds the AOTInductor `metal_backend`
-> + `aoti_common` runtime and requires PyTorch at configure time (it links torch's `libomp`).
-> `neural_tilde`'s `nn_executorch.cmake` auto-links `metal_backend` when the runtime exports the
-> target, so no extra flag is needed on the external build. **Runtime libomp:** the Metal runtime
-> and the compiled `.so` embedded in each `.pte` depend on `libomp` at load; the external build
-> ships a copy of it inside every ExecuTorch `.mxo` and repoints the dependency to `@rpath` (see
-> `cmake/nn_metal_libomp.sh`). Pass `-DNN_LIBOMP_PATH=/path/to/libomp.dylib` — for an exact ABI
-> match, use the **same** `libomp` the ET runtime (torch) was built with (e.g. `<torch>/lib/
-> libomp.dylib`); it falls back to a Homebrew `libomp` if unset. **Exporting** a Metal `.pte` also
-> needs `libomp` on `LIBRARY_PATH` (the exporter auto-adds the active torch's lib dir; set it
-> manually otherwise) and tolerates a missing torchao-MPS build. See "Choosing a delegate" below. -->
 
+ - The patch (run from the neural_tilde checkout) fixes transposed convolutions in the Metal backend: upstream reads the output channel count and the weight layout as if they were a forward conv, so any `ConvTranspose` model fails or computes the wrong result on `delegate="metal"`.
+ - `--preset mlx-release` turns on the MLX delegate and builds MLX and `mlx.metallib` from the submodule.
+ - `-DEXECUTORCH_ENABLE_LOGGING=ON -DEXECUTORCH_LOG_LEVEL=Error`: the runtime's own error messages reach the Max console through neural_tilde's log sink.
+ - `-DEXECUTORCH_BUILD_METAL=ON` builds the experimental Metal (AOTInductor) runtime and needs torch from step 1 at configure time. Leave it out to build without Metal.
+ - ExecuTorch 1.4 removed the MPS delegate, so there is no `-DEXECUTORCH_BUILD_MPS`. Re-export old `delegate="mps"` models with `mlx` or `coreml`.
 
-### 2. Build the `neural.live~` externals
+<!--
+> **Metal runtime libomp:** the Metal runtime and the compiled `.so` embedded in each `.pte`
+> depend on `libomp` at load; the external build ships a copy of it inside every ExecuTorch `.mxo`
+> and repoints the dependency to `@rpath` (see `cmake/nn_metal_libomp.sh`). Pass
+> `-DNN_LIBOMP_PATH=/path/to/libomp.dylib` — for an exact ABI match, use the **same** `libomp` the
+> ET runtime (torch) was built with (e.g. `<torch>/lib/libomp.dylib`); it falls back to a Homebrew
+> `libomp` if unset. **Exporting** a Metal `.pte` also needs `libomp` on `LIBRARY_PATH` (the
+> exporter auto-adds the active torch's lib dir; set it manually otherwise) and tolerates a missing
+> torchao-MPS build. -->
 
-Point `EXECUTORCH_ROOT` at the install dir from step 1 and build (run from this package folder;
-clone with `--recursive` if you're fetching it fresh, for the `min-api` submodule):
+### 3. Build the Max externals
+
+From this package folder:
 
 ```bash
-cmake -G "Unix Makefiles" -S src -B build_et \
-  -DEXECUTORCH_ROOT=/path/to/executorch/cmake-out \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 \
-  -DCMAKE_BUILD_TYPE=Release
+export EXECUTORCH_ROOT=/path/to/executorch/cmake-out
+cmake --preset macos-release -S src \
+  -DNN_LIBOMP_PATH=/path/to/nt-env/lib/python3.12/site-packages/torch/lib/libomp.dylib
 cmake --build build_et -j8
 ```
 
-This produces the three externals in **`src/externals/`** — `neural.live~.mxo`, `mc.neural.live~.mxo`,
-`mcs.neural.live~.mxo`. 
+This produces:
+ - the seven externals in **`src/externals/`**: `neural.live~`, `mc.neural.live~`, `mcs.neural.live~`, `neural.gen~`, `neural.tokenizer`, `neural.info`, `neural.gaussianize` (`.mxo`);
+ - the standalone harnesses in `build_et/` (`et_smoke_test`, `gen_smoke_test`), plus `build_et/tokenizer/tok_test` and `build_et/generative/gen_cli`.
 
-### 3. Install them
+`-DNN_LIBOMP_PATH` is only needed with the Metal runtime (see the note in step 2). Without Rust, add `-DNN_ENABLE_TOKENIZER=OFF`. The package version comes from `pyproject.toml`.
+
+### 4. Install them
 
 Copy the freshly built bundles into the package's top-level `externals/` (the folder Max
 actually loads), ad-hoc code-sign them, and restart Max:
@@ -74,6 +87,13 @@ actually loads), ad-hoc code-sign them, and restart Max:
 ```bash
 rsync -a --delete src/externals/ externals/
 codesign --force --deep -s - externals/*.mxo
+```
+
+### 5. Runtime smoke tests (no Max needed)
+
+```bash
+build_et/et_smoke_test model.pte forward --io in.f32 out.f32 --ref ref.f32 --reset-check
+build_et/gen_smoke_test model.pte <method>
 ```
 
 

@@ -284,11 +284,12 @@ class LiveModule(_ExporterBase):
 
         Args:
             path: output path; ``.pte`` is appended if missing.
-            delegate: "xnnpack" (default), "coreml", "mlx", "mps", "metal", "cuda", or
-                "portable". All persist cached_conv streaming state across execute() (mlx/mps
-                verified bit-identical to xnnpack). mlx and mps are experimental with
-                narrower op coverage, so some models abort at runtime — validate each
-                exported model on the target. "metal" (EXPERIMENTAL) whole-graph
+            delegate: "xnnpack" (default), "coreml", "mlx", "metal", "cuda", or
+                "portable". All persist cached_conv streaming state across execute() (mlx
+                verified bit-identical to xnnpack). mlx is experimental with narrower op
+                coverage, so some models abort at runtime — validate each exported model on
+                the target. "mps" is legacy: ExecuTorch 1.4 removed it, so it only works
+                from an ExecuTorch 1.3 export env and this runtime can't load it. "metal" (EXPERIMENTAL) whole-graph
                 AOTInductor compile to an embedded Metal .so (needs the ExecuTorch Metal
                 runtime + macOS); cached_conv state persistence across a monolithic AOTI
                 function is UNVERIFIED for streaming — smoke-test before relying on it.

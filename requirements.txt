@@ -1,6 +1,8 @@
-# Full export/build environment (NOT the pip-install deps -- see pyproject.toml).
-# executorch is built from source for the MLX/CoreML delegates; not installable from PyPI.
-torch>=2.12.0
+# macOS (Apple Silicon) export environment, ExecuTorch 1.5 (NOT the pip-install deps -- see
+# pyproject.toml). The PyPI executorch wheel ships the MLX, CoreML, Metal and XNNPACK
+# partitioners; its version must match the C++ runtime the externals link. See Build.md.
+# Windows/CUDA: requirements-cuda.txt.
+torch==2.14.0
+executorch==1.5.1
+coremltools==9.0
 cached_conv>=2.5.0
-executorch==1.3.1
-coremltools>=9.0

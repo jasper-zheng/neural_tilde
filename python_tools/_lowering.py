@@ -91,12 +91,19 @@ def _make_partitioner(delegate: str, coreml_disable_weight_sharing: bool = False
         from executorch.backends.mlx.partitioner import MLXPartitioner
         return [MLXPartitioner()]
     if delegate == "mps":
-        # MPS (Apple GPU via MPSGraph).DEPRECATED in executorch >=1.4 (migrate to coreml/mlx).
+        # MPS (Apple GPU via MPSGraph). LEGACY: removed in executorch >=1.4, so only an older
+        # (1.3.x) export env can still lower to it; neural_tilde's 1.5 runtime can't run it.
         # It does persist cached_conv streaming state across execute().
         # Some ops are unsupported and abort at runtime, need to validate on every exported model.
         # FLOAT32 by default to avoid fp16 audio degradation; set NN_MPS_FP16=1 to opt into fp16.
-        from executorch.backends.apple.mps.partition.mps_partitioner import (
-            MPSPartitioner)
+        try:
+            from executorch.backends.apple.mps.partition.mps_partitioner import (
+                MPSPartitioner)
+        except ImportError as e:
+            raise ValueError(
+                f"delegate 'mps' is not available in executorch {_executorch_version()}: "
+                "the MPS backend was removed in ExecuTorch 1.4. Use 'mlx' or 'coreml' "
+                "(Apple GPU) instead.") from e
         from executorch.exir.backend.compile_spec_schema import CompileSpec
         use_fp16 = os.environ.get("NN_MPS_FP16", "0") == "1"
         return [MPSPartitioner(
@@ -156,7 +163,7 @@ def _make_partitioner(delegate: str, coreml_disable_weight_sharing: bool = False
         from ._cuda_lowering import make_cuda_partitioner
         return make_cuda_partitioner(method_name or "forward")
     raise ValueError(f"unknown delegate '{delegate}' (expected 'xnnpack', 'coreml', 'mlx', "
-                     "'mps', 'metal', 'cuda', or 'portable')")
+                     "'metal', 'cuda', or 'portable')")
 
 
 # ------------------------------------------------------------------- AOTInductor delegates
@@ -334,9 +341,14 @@ def _metal_decompose_splits(exported):
 
 
 def _metal_graph_transforms():
-    """Metal/AOTI per-method ExportedProgram transforms, in order: const-fold (the pow bug),
-    then split/chunk decomposition (split_copy). Appended after any user ``graph_transforms``."""
-    return [_metal_constant_fold, _metal_decompose_splits]
+    """Metal/AOTI per-method ExportedProgram transforms, in order: split/chunk decomposition
+    (split_copy), then const-fold (the pow bug). Appended after any user ``graph_transforms``.
+
+    The decomposition goes first because it also functionalizes the graph: ``torch.export``
+    leaves a cached_conv cache update as an in-place ``copy_`` with no BUFFER_MUTATION spec, so
+    folding first treats the streaming caches as read-only and bakes them into constants (and
+    the later decomposition then fails on the ``copy_`` into a constant)."""
+    return [_metal_decompose_splits, _metal_constant_fold]
 
 
 def _metal_setup_link_env() -> None:

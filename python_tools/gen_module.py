@@ -231,8 +231,8 @@ class GenModule(_ExporterBase):
 
         Args:
             path: output path; ``.pte`` is appended if missing.
-            delegate: "mlx" (default), "coreml", "xnnpack", "mps", "metal", "cuda", or
-                "portable". "metal" (EXPERIMENTAL) whole-graph AOTInductor compile to a Metal
+            delegate: "mlx" (default), "coreml", "xnnpack", "metal", "cuda", or
+                "portable" ("mps" is legacy, removed in ExecuTorch 1.4). "metal" (EXPERIMENTAL) whole-graph AOTInductor compile to a Metal
                 .so embedded in the .pte — moves the heavy compile to export time for a fast
                 load; needs the ExecuTorch Metal runtime (EXECUTORCH_BUILD_METAL) + macOS.
                 "cuda" (Windows x64 + NVIDIA) whole-graph AOTInductor compile to Triton kernels

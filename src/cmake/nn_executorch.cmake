@@ -1,10 +1,8 @@
-# Locate the ExecuTorch 1.3.1 runtime (built + installed out-of-tree) and provide
-# a helper to link a Max external against it together with the MLX delegate.
+# Locate the ExecuTorch 1.5.1 runtime (built + installed out-of-tree) and provide
+# a helper to link a Max external against it together with its delegates.
 #
-# Build the runtime once (see ADAPTATION_GUIDE.md):
-#   cd <executorch> && cmake --preset mlx-release -DPYTHON_EXECUTABLE=<venv python>
-#   cmake --build cmake-out --target install -j8
-# then configure neural with:
+# Build the runtime once (see Build.md; macOS: the mlx-release preset + CoreML,
+# XNNPACK and Metal; Windows: XNNPACK + CUDA), then configure neural with:
 #   -DEXECUTORCH_ROOT=<executorch>/cmake-out
 
 if(NOT DEFINED EXECUTORCH_ROOT AND DEFINED ENV{EXECUTORCH_ROOT})
@@ -141,8 +139,8 @@ function(nn_link_executorch target)
   # MPS (Apple GPU via MPSGraph) delegate. Persists cached_conv streaming state
   # across execute() (verified bit-identical to XNNPACK), so it streams correctly —
   # but its op/shape coverage is incomplete and some models abort at runtime in
-  # MPSGraph verification, so validate each model. Deprecated in ExecuTorch >=1.4
-  # (use CoreML/Metal there). The imported target already carries the Metal*
+  # MPSGraph verification, so validate each model. Removed in ExecuTorch 1.4, so
+  # this only links against an older (1.3.x) runtime; a 1.5 root has no target. The imported target already carries the Metal*
   # frameworks + -force_load via its interface; the frameworks are re-listed here
   # to match the CoreML/MLX blocks.
   if(TARGET mpsdelegate)

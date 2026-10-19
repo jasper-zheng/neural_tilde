@@ -5,7 +5,7 @@ If you are exporting your own models to `neural.gen~` or `neural.live~`, please 
 - the **model-export side** (Python: the `pip install neural_tilde` exporter).
 - the **MaxMSP runtime side**.
 
-<!-- Both sides build against this single document. Both sides are pinned to **ExecuTorch 1.3.1**. -->
+<!-- Both sides build against this single document. Both sides are pinned to **ExecuTorch 1.5.1**. -->
 
 
 ## Contents
@@ -69,8 +69,8 @@ Both kinds share this template:
 ```jsonc
 {
   "kind": "live",                 // REQUIRED: "live" or "gen"
-  "executorch_version": "1.3.1",  // Optional
-  "delegate": "coreml",           // REQUIRED: "coreml, xnnpack, mlx, mps, metal, or portable" (metal = experimental)
+  "executorch_version": "1.5.1",  // Optional
+  "delegate": "coreml",           // REQUIRED: "coreml, xnnpack, mlx, metal, cuda, or portable" (metal = experimental; legacy "mps" models no longer load)
   "seed": 0,                      // Optional
   "buffer_size": 4096,            // live only
 
@@ -253,7 +253,7 @@ Use `neural_tilde.LiveModule` (`python_tools/live_module.py`) in the Python tool
 ```jsonc
 {
   "kind": "live",
-  "executorch_version": "1.3.1",
+  "executorch_version": "1.5.1",
   "delegate": "coreml",           
   "buffer_size": 4096,            
   "seed": 0,                      
@@ -316,7 +316,7 @@ Use `neural_tilde.GenModule` (`python_tools/gen_module.py`) for offline generati
 ```jsonc
 {
   "kind": "gen",
-  "executorch_version": "1.3.1",
+  "executorch_version": "1.5.1",
   "delegate": "mlx",
   "seed": 0,
   "methods": {

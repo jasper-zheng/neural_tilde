@@ -61,7 +61,7 @@ This package has two families of Max objects:
 
 - **[MLX](https://github.com/ml-explore/mlx)** - Uses Apple-Silicon GPU.
 - **[Core ML](https://developer.apple.com/documentation/coreml)** - Uses all compute units by default (CPU / GPU / ANE). Needs **macOS 15+** at runtime.
-- **[MPS](https://docs.pytorch.org/executorch/stable/backends/mps/mps-overview.html)** - Apple-Silicon GPU via MPSGraph. (Deprecated by ExecuTorch, use CoreML or MLX instead)
+- ~~MPS~~ - removed in ExecuTorch 1.4 and not in this build. Re-export MPS models with CoreML or MLX.
 - **[XNNPACK](https://github.com/google/XNNPACK)** - CPU inference with optimized kernels.
 - **portable** - plain, unoptimized C++ kernels, maximum compatibility
 - ~~CUDA~~ - Windows CUDA in progress
@@ -352,7 +352,7 @@ See the table below for a comparison of the two packages:
 | Real-time streaming | ✅ `neural.live~` | ✅ |
 | Input types | ✅ `signal`, `attribute`, `condition`, `noise`, `buffer` | ❌ only `signal` + `attribute` |
 | Attributes | ✅ Added as native Max attributes | ❌ use `set` / `get` messages |
-| Backends | ✅ MLX, CoreML, XNNPack, MPS, Portable | ❌ only TorchScript |
+| Backends | ✅ MLX, CoreML, XNNPack, Portable | ❌ only TorchScript |
 | Dynamic device | ❌ Fixed when exporting | ✅ Can be switched in runtime |
 | Dynamic buffer size | ❌ Fixed when exporting | ✅ Specified as an argument |
 | Library | ExecuTorch | TorchScript (deprecated in PyTorch 2.10) |
