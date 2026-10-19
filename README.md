@@ -7,12 +7,10 @@ Models are exported from PyTorch with [ExecuTorch](https://pytorch.org/executorc
 
 <img src="assets/front.png" width="700" alt="example patch" />
 
-
-This package has two families of Max objects:
-
+**Package Overview:**
 | object | use it for |
 | --- | --- |
-| `neural.live~` (`mc/mcs`) | Neural synthesis with real-time streaming I/O (e.g. neural vocoder, neural codecs...) |
+| `neural.live~` (`mc/mcs`) | Neural synthesis with real-time streaming I/O (e.g. neural vocoder, neural codecs, accompaniment models...) |
 | `neural.gen~` | Neural synthesis with one-shot offline generation (e.g. latent-diffusion text-to-audio, audio-to-audio...) |
 | `neural.tokenizer` | [Utility] Tokenize a text prompt into token IDs and attention mask |
 | `neural.gaussianize` | [Utility] Map uniform `jit.noise` to Gaussian noise |
@@ -23,15 +21,29 @@ This package has two families of Max objects:
  - [Live] [SAME-S](https://github.com/jasper-zheng/streamable-same-s): A streamable codec for audio encoding/decoding
  - [Live] [Open-Unmix-Live](https://github.com/jasper-zheng/open-unmix-maxmsp) Realtime source separation for vocals, drums, bass
  - [Gen] [Stable Audio 3](https://github.com/jasper-zheng/stable-audio-3-tilde): Latent diffusion transformer for text-to-audio, audio-to-audio, inpainting
+ - [Gen] [mimetic-a0](https://github.com/jasper-zheng/mimetic-a0): A text-to-audio model built for fine-tuning.
  - [Gen] [CodiCodec-Flow](https://github.com/jasper-zheng/codicodec-flow) [Available soon]
-
-**Note:** Currently only available for MaxMSP on Apple Silicon, macOS. For Windows/CUDA, it's on the todo list. 
 
 **Acknowledgement:** `neural.live~` and its `mc`, `mcs` variants reused an extensive amount of code from [`nn~`](https://github.com/acids-ircam/nn_tilde), migrated from TorchScript/libtorch to more modern ExecuTorch. See [Migrate from nn~](#migrate-from-nn). `nn~` is the work by [acids-ircam](https://github.com/acids-ircam), licensed **CC BY-NC 4.0**. 
 
+## How It Works
+
+ - **Export**: Export a PyTorch neural audio model using [ExecuTorch](https://docs.pytorch.org/executorch/main/getting-started.html), with a target hardware backend (see below). This results in a `.pte` (the model program + weights) file.  
+ - **Config**: Register a `.json` metadata by the Python tool, detailing inlet/outlet, attributes, condition shapes, etc. 
+ - **Load**: Hand `neural.live~` / `neural.gen~` the `.pte` and `.json` files in Max.
+
+### Supported back-ends:
+
+- **[MLX](https://github.com/ml-explore/mlx)** - Uses Apple-Silicon GPU.
+- **[Core ML](https://developer.apple.com/documentation/coreml)** - Uses all compute units by default (CPU / GPU / ANE). Needs **macOS 15+** at runtime.
+- **[XNNPACK](https://github.com/google/XNNPACK)** - CPU inference with optimized kernels.
+- **[CUDA](https://docs.pytorch.org/executorch/stable/backends/cuda/cuda-overview.html)** - NVIDIA GPU (Windows) via AOTInductor.
+- **portable** - plain, unoptimized C++ kernels, maximum compatibility
+<!-- - **[Metal](https://github.com/pytorch/executorch/tree/main/backends/apple/metal)** *(experimental)* - Apple-Silicon GPU via AOTInductor. Compiles the whole graph to a Metal `.so` embedded in the `.pte` **at export time**, so it loads fast (no Core ML–style compile at load). Needs an ExecuTorch runtime built with `-DEXECUTORCH_BUILD_METAL=ON` + **macOS**. -->
+
+
 
 ## Table of Contents
-- [How It Works](#how-it-works)
 - [Install the Externals](#install-the-externals)
 - [Objects](#objects)
   - [`neural.live~`](#neuralive)
@@ -49,23 +61,6 @@ This package has two families of Max objects:
 - [Build the Externals from Source](#build-the-externals-from-source)
 - [Credits](#credits)
 
-
-
-## How It Works
-
- - **Export**: Export a PyTorch neural audio model using [ExecuTorch](https://docs.pytorch.org/executorch/main/getting-started.html), with a target hardware backend (see below). This results in a `.pte` (the model program + weights) file.  
- - **Config**: Register a `.json` metadata by the Python tool, detailing inlet/outlet, attributes, condition shapes, etc. 
- - **Load**: Hand `neural.live~` / `neural.gen~` the `.pte` and `.json` files in Max.
-
-### Supported back-ends:
-
-- **[MLX](https://github.com/ml-explore/mlx)** - Uses Apple-Silicon GPU.
-- **[Core ML](https://developer.apple.com/documentation/coreml)** - Uses all compute units by default (CPU / GPU / ANE). Needs **macOS 15+** at runtime.
-- ~~MPS~~ - removed in ExecuTorch 1.4 and not in this build. Re-export MPS models with CoreML or MLX.
-- **[XNNPACK](https://github.com/google/XNNPACK)** - CPU inference with optimized kernels.
-- **portable** - plain, unoptimized C++ kernels, maximum compatibility
-- ~~CUDA~~ - Windows CUDA in progress
-<!-- - **[Metal](https://github.com/pytorch/executorch/tree/main/backends/apple/metal)** *(experimental)* - Apple-Silicon GPU via AOTInductor. Compiles the whole graph to a Metal `.so` embedded in the `.pte` **at export time**, so it loads fast (no Core ML–style compile at load). Needs an ExecuTorch runtime built with `-DEXECUTORCH_BUILD_METAL=ON` + **macOS**. -->
 
 
 ## Install the externals
