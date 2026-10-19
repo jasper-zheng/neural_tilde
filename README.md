@@ -3,7 +3,9 @@
 [![PyPI version](https://img.shields.io/pypi/v/neural-tilde.svg)](https://pypi.org/project/neural-tilde/) [![Status](https://img.shields.io/badge/status-alpha-orange)](https://github.com/jasper-zheng/neural_tilde) [![Built with ExecuTorch](https://img.shields.io/badge/built%20with-ExecuTorch-EE4C2C?logo=pytorch)](https://pytorch.org/executorch/)
 
 **Max externals for running neural synthesis models realtime/offline.**   
-Models are exported from PyTorch with [ExecuTorch](https://pytorch.org/executorch/) and run inside Max with hardware acceleration on CPU / GPU / ANE (Apple Neural Engine).
+Models are exported from PyTorch with [ExecuTorch](https://pytorch.org/executorch/) and run inside Max with hardware acceleration on CPU / GPU / ANE (Apple Neural Engine), on MacOS and Windows.
+
+> **Oct-2026 Update:** CUDA backend is now supported on Windows. A new agent skill [`export-neural-model`](.claude/skills/export-neural-model) is available to help your coding agent to export your own model.
 
 <img src="assets/front.png" width="700" alt="example patch" />
 
@@ -205,7 +207,8 @@ pip install neural-tilde
  - **Register methods:** use `register_method(...)` register each method and their inputs / outputs. Registered roles are listed in order via the `inputs=[...]` argument; the method takes them after the audio tensor (e.g., `forward(self, x, gain, bias)`). 
  - **Export model:** Use `export_to_pte(..., delegate="coreml")` to export, which will result in the model weights `.pte` and the metadata `.json`
 
-See [PROTOCOL.md 2.4 Input Roles](PROTOCOL.md#24-input-roles) for detailed Python API.
+See [PROTOCOL.md 2.4 Input Roles](PROTOCOL.md#24-input-roles) for detailed Python API.  
+Or, point your coding agent to the [export-neural-model](.claude/skills/export-neural-model) agent skill.
 
 ### Live Example:
 

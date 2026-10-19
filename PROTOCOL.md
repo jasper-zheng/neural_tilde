@@ -70,7 +70,7 @@ Both kinds share this template:
 {
   "kind": "live",                 // REQUIRED: "live" or "gen"
   "executorch_version": "1.5.1",  // Optional
-  "delegate": "coreml",           // REQUIRED: "coreml, xnnpack, mlx, metal, cuda, or portable" (metal = experimental; legacy "mps" models no longer load)
+  "delegate": "coreml",           // REQUIRED: "coreml, xnnpack, mlx, cuda, or portable" (legacy "mps" models no longer load)
   "seed": 0,                      // Optional
   "buffer_size": 4096,            // live only
 
