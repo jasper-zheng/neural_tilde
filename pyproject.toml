@@ -40,8 +40,8 @@ Repository = "https://github.com/jasper-zheng/neural_tilde"
 neural-tilde-migrate = "neural_tilde.migrate:main"   # migrate.py already has main()
 
 [tool.setuptools]
-packages = ["neural_tilde"]
+packages = ["neural_tilde", "neural_tilde.data"]    # data/ is a data-only package
 package-dir = { neural_tilde = "python_tools" }      # mirrors old setup.py mapping exactly
 
 [tool.setuptools.package-data]
-neural_tilde = ["data/*.lib"]                        # aoti_cuda_shims.lib for delegate="cuda"
+"neural_tilde.data" = ["*.lib"]                      # aoti_cuda_shims.lib for delegate="cuda"
