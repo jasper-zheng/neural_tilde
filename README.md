@@ -23,6 +23,7 @@ Models are exported from PyTorch with [ExecuTorch](https://pytorch.org/executorc
  - [Live] [SAME-S](https://github.com/jasper-zheng/streamable-same-s): A streamable codec for audio encoding/decoding
  - [Live] [Open-Unmix-Live](https://github.com/jasper-zheng/open-unmix-maxmsp) Realtime source separation for vocals, drums, bass
  - [Gen] [Stable Audio 3](https://github.com/jasper-zheng/stable-audio-3-tilde): Latent diffusion transformer for text-to-audio, audio-to-audio, inpainting
+ - [Gen] [TCSinger2-MaxMSP](https://github.com/jasper-zheng/tcsinger2-maxmsp) A Singing Voice Synthesis (SVS) model adapted from TCSinger 2.
  - [Gen] [mimetic-a0](https://github.com/jasper-zheng/mimetic-a0): A text-to-audio model built for fine-tuning.
  - [Gen] [CodiCodec-Flow](https://github.com/jasper-zheng/codicodec-flow) [Available soon]
 
