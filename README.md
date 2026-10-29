@@ -363,6 +363,8 @@ If you have a RAVE TorchScript (`.ts`) model exported for `nn~`, you can migrate
 
 ```bash
 python -m neural_tilde.migrate musicnet.ts --out musicnet --delegate coreml
+# Windows + NVIDIA (see MIGRATE.md):
+python -m neural_tilde.migrate musicnet.ts --out musicnet --delegate cuda --skip-noise-synth
 ```
 
 **Note:** This is experimental, migration is not guaranteed to succeed on all models. It also disables the prior methods if your model has one. It also disable the noise-synth if it has one (e.g., the one used in many percussion models).

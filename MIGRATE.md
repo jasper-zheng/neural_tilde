@@ -32,6 +32,13 @@ python -m neural_tilde.migrate percussion.ts --out percussion --delegate coreml
 # writes percussion.pte + percussion.json
 ```
 
+For Windows + NVIDIA, use `--delegate cuda` from a "Developer PowerShell for VS 2022" with the CUDA export environment from [Build.md](Build.md#windows-cuda). The export machine needs a CUDA GPU. The CUDA runtime has no FFT kernels, so always pass `--skip-noise-synth` to keep `decode`/`forward`:
+
+```powershell
+python -m neural_tilde.migrate percussion.ts --out percussion --delegate cuda --skip-noise-synth
+# writes percussion.pte + percussion.ptd (weights) + percussion.json
+```
+
 **Note:** This is experimental, migration is not guaranteed to succeed on all models. It also disables the prior methods if your model has one. It also disable the noise-synth if it has one (e.g., the one used in many percussion models).
 
 ## Input types (roles)

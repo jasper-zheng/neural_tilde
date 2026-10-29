@@ -192,7 +192,7 @@ build\Release\gen_smoke_test.exe model.pte <method>
 ```
 
 A CUDA model's `.ptd` is found through the `data_file` in its JSON (or `--data`). If the model can't run on this machine (no NVIDIA GPU, a driver too old for CUDA 13.0, a GPU older than the model's `cuda_min_arch`, a macOS-only delegate), the harness prints the reason and exits with status 3. `CUDA_VISIBLE_DEVICES=-1` hides the GPU, to test that path (in Max too, when Max is started from that shell).
-
+<!-- 
 ### 6. Make the Windows zip
 
 ```powershell
@@ -204,5 +204,6 @@ This writes `releases\neural_tilde_<version>_windows_x64.zip` and a `.sha256` fi
  - **Contents:** one `neural_tilde\` folder holding `externals\` (the 7 `.mxe64`), `support\` (the 2 CUDA runtime DLLs), `docs\` (the `.maxref.xml` pages), and `README.md`, `PROTOCOL.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md` and `INSTALL-windows.txt`. There are no models or help patches; those ship separately.
  - **Import check:** before packing, the script checks every binary's DLL imports with `dumpbin`. Each import must be a Windows DLL, a Max DLL, the Visual C++ runtime, or a DLL in `support\`; anything else stops it (e.g. a debug build, or an import of `nvcuda.dll`, which would stop the externals loading on machines without an NVIDIA driver).
  - **Reproducible:** the same inputs give the same zip.
+ - **With help patches:** put them (and their example models) in `releases\neural_tilde\help\`, then run `python src\package\make_windows_zip.py --stage releases\neural_tilde`. The script copies the build into that folder and zips all of it. It warns about any model JSON there whose delegate only runs on macOS (`coreml`, `mlx`).
 
-`third_party_notices.py` regenerates the committed `THIRD_PARTY_NOTICES.md`. It reads the licenses from the ExecuTorch checkout, the tokenizers-cpp sources in the build tree, `min-api`, torch's wheel, and the Rust crates through `cargo metadata --offline`.
+`third_party_notices.py` regenerates the committed `THIRD_PARTY_NOTICES.md`. It reads the licenses from the ExecuTorch checkout, the tokenizers-cpp sources in the build tree, `min-api`, torch's wheel, and the Rust crates through `cargo metadata --offline`. -->

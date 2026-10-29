@@ -70,12 +70,13 @@ Two RAVE-specific gaps decide whether decode / forward survive:
   so the lowering needs them on its exception list (handled). **CoreML** compiles them; the
   stock xnnpack/portable CPU runtime has no ``rand*`` kernel, so use ``--rng zero`` there.
 * **Complex / FFT** (``view_as_complex`` / ``fft_rfft`` / ``fft_irfft`` — RAVE's noise synth,
-  in ``decode`` / ``forward``): **not supported by coremltools** (no ``complex64`` dtype) and
-  not in the portable CPU kernel set. Methods using them cannot lower to CoreML and won't run
-  on the CPU runtime, so they are skipped by default. ``encode`` (no FFT) migrates and runs.
+  in ``decode`` / ``forward``): **not supported by coremltools** (no ``complex64`` dtype), not
+  in the portable CPU kernel set, and not in ExecuTorch's CUDA shims. Methods using them cannot
+  lower to CoreML / CUDA and won't run on the CPU runtime, so they are skipped by default.
+  ``encode`` (no FFT) migrates and runs.
 
   Pass ``--skip-noise-synth`` to **excise** the noise-synth branch: ``decode`` / ``forward``
-  then lower and run on CoreML/CPU, at the cost of the synthesized noise texture (see
+  then lower and run on CoreML/CUDA/CPU, at the cost of the synthesized noise texture (see
   :func:`_skip_noise_synth`). This is clean only when the noise synth is a *terminal additive
   branch* (e.g. percussion). When it rejoins mid-network before skip-connected, cached
   processing (e.g. VCTK), removing it disconnects the streaming caches — :func:`_eager_streams`
@@ -711,15 +712,12 @@ def migrate(ts_path: str, out: str, delegate: str = "coreml",
 
     logging.info("Migrating %s: methods=%s buffer_size=%d delegate=%s rng=%s",
                  ts_path, list(methods), buffer_size, delegate, rng)
-    if delegate == "cuda":
-        # Migrated RAVE lowers to CUDA (with --skip-noise-synth: the FFT synth has no CUDA
-        # kernels) but the compiled program currently diverges from eager — the same graph is
-        # correct run eagerly on the GPU, and LiveModule exports of cached-conv models are
-        # correct on CUDA. Under investigation (WP7).
+    if delegate == "cuda" and not skip_noise_synth:
+        # The ExecuTorch CUDA shims have no FFT kernels, so a method that still carries RAVE's
+        # noise synth fails to lower and is skipped.
         logging.warning(
-            "delegate='cuda' for migrated TorchScript models is EXPERIMENTAL: migrated RAVE "
-            "output currently diverges from the original. Validate before use, or re-export "
-            "from the checkpoint with LiveModule.export_to_pte(delegate='cuda').")
+            "delegate='cuda' has no FFT kernels: methods with RAVE's noise synth will be "
+            "skipped. Pass --skip-noise-synth to keep decode/forward (without the noise).")
 
     method_graphs = {}
     primed = {}  # method name -> FQNs of its lifted streaming caches (for the zero-init pass)
@@ -853,10 +851,9 @@ def main() -> None:
                     choices=["coreml", "xnnpack", "metal", "cuda", "portable"],
                     help="ExecuTorch backend (coreml recommended on macOS; compiles RNG, but "
                          "skips FFT-synth methods it can't represent — see module docstring). "
-                         "metal is EXPERIMENTAL (AOTInductor; unvalidated for RAVE). cuda is "
-                         "EXPERIMENTAL for migrated models: Windows + NVIDIA (AOTInductor; "
-                         "writes a .ptd beside the .pte; use --skip-noise-synth for RAVE; "
-                         "output currently diverges — validate)")
+                         "metal is EXPERIMENTAL (AOTInductor; unvalidated for RAVE). cuda: "
+                         "Windows + NVIDIA (AOTInductor; writes a .ptd beside the .pte; run "
+                         "from a VS 2022 Developer PowerShell; use --skip-noise-synth for RAVE)")
     ap.add_argument("--buffer-size", type=int, default=None,
                     help="audio block size to bake in (default: the model's largest ratio)")
     ap.add_argument("--rng", default="keep", choices=["keep", "zero"],

@@ -193,10 +193,37 @@ def _setenv(stack: contextlib.ExitStack, name: str, value: str) -> None:
                    else os.environ.pop(name, None))
 
 
+def _with_fresh_kernel_caches(aot_compile):
+    """Wrap ``torch._inductor.aot_compile`` to start each call from inductor's fresh-process
+    kernel state.
+
+    The CUDA backend runs one AOTI compile per method in the same process. Inductor's kernel
+    names (``triton_poi_fused_cat_slice_0``, ...) are only unique within a graph, but the
+    C++ wrapper reads each kernel's launch params from ``CudaKernelParamCache``, which is
+    process-wide and keyed by name. A kernel object already loaded by an earlier method is
+    also never saved there again (``cuda_kernel_saved``). So a later method can launch an
+    earlier method's same-named kernel params: an ``InductorError`` when the argument counts
+    differ, and silently wrong output when they match (this was the migrated RAVE divergence
+    reported in WP2). Clearing the in-memory caches (the ``@clear_on_fresh_cache`` ones,
+    including ``PyCodeCache`` and ``CudaKernelParamCache``, plus the compiled-Triton cache)
+    makes each method compile and save its own kernels. On-disk caches still apply."""
+    import functools
+    from torch._inductor.async_compile import CompiledTritonKernels
+    from torch._inductor.utils import clear_caches
+
+    @functools.wraps(aot_compile)
+    def compile_fresh(*args, **kwargs):
+        clear_caches()
+        CompiledTritonKernels.cache_clear()
+        return aot_compile(*args, **kwargs)
+    return compile_fresh
+
+
 @contextlib.contextmanager
 def cuda_lowering():
     """Context for ``to_edge_transform_and_lower`` with CUDA partitioners: preflight checks,
-    target-arch recompilation, and (on a Windows host) the native-MSVC AOTI patches."""
+    target-arch recompilation, per-method kernel-cache isolation, and (on a Windows host) the
+    native-MSVC AOTI patches."""
     _preflight()
     import torch
     import torch._inductor.utils as inductor_utils
@@ -210,6 +237,8 @@ def cuda_lowering():
         # convs fall back to aoti_torch_cuda_convolution, which the CUDA shims lack. The SM
         # count only gates autotuning on the export machine, not where the kernels run.
         _swap(stack, inductor_utils, "is_big_gpu", lambda index_or_device=0: True)
+        _swap(stack, torch._inductor, "aot_compile",
+              _with_fresh_kernel_caches(torch._inductor.aot_compile))
         if sys.platform == "win32":
             _patch_windows_host(stack)
         logging.info("CUDA export: target sm_%s, SASS %s (TORCH_CUDA_ARCH_LIST=%s)",

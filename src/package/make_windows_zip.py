@@ -8,7 +8,9 @@ third_party_notices.py, whose output it packs):
 The zip holds one neural_tilde/ folder, to unzip into Documents/Max 9/Packages:
 the 7 externals (.mxe64), the CUDA runtime DLLs in support/, the reference
 pages in docs/, and the README, PROTOCOL, LICENSE, third-party notices and
-install notes. No models and no help patches: those ship separately.
+install notes. The help patches and their example models are staged by hand:
+with --stage releases/neural_tilde, the files above are copied into that
+folder and the whole folder is zipped, help/ included.
 
 Before writing it, every packed binary's DLL imports are checked: each must be
 a Windows DLL, a Max DLL, the Microsoft C++ runtime, or a DLL in support/.
@@ -19,6 +21,7 @@ timestamps), and a .sha256 file is written next to it.
 
 import argparse
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -46,6 +49,9 @@ WINDOWS_DLLS = {"kernel32.dll", "ntdll.dll", "bcrypt.dll", "bcryptprimitives.dll
                 "oleaut32.dll", "ws2_32.dll", "userenv.dll", "iphlpapi.dll",
                 "psapi.dll", "version.dll", "dbghelp.dll", "secur32.dll",
                 "crypt32.dll", "shlwapi.dll", "synchronization.dll"}
+
+# Delegates whose models only run on macOS (warned about if packed).
+MACOS_ONLY_DELEGATES = {"coreml", "mlx", "mps", "metal"}
 
 # One fixed timestamp for every entry, so the zip only changes with its content.
 ZIP_DATE = (2026, 1, 1, 0, 0, 0)
@@ -162,10 +168,45 @@ def gather(build):
     return sorted(files)
 
 
+def install_bytes(text):
+    return text.replace("\n", "\r\n").encode()
+
+
+def stage(stage_dir, entries, install):
+    """Copy the packed files into stage_dir (the release's neural_tilde folder),
+    then return everything in it, so files added there by hand (help/) are
+    packed too."""
+    for arc, src in entries:
+        dst = stage_dir / arc
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(install_bytes(install) if src is None else src.read_bytes())
+    return sorted((p.relative_to(stage_dir).as_posix(), p)
+                  for p in stage_dir.rglob("*")
+                  if p.is_file() and p.name not in (".DS_Store", "Thumbs.db")
+                  and not p.name.startswith("._"))
+
+
+def warn_macos_only_models(entries):
+    """Model JSONs in the zip whose delegate can't run on Windows."""
+    for arc, src in entries:
+        if src is None or not arc.endswith(".json"):
+            continue
+        try:
+            meta = json.loads(src.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        delegate = meta.get("delegate") if isinstance(meta, dict) else None
+        if delegate in MACOS_ONLY_DELEGATES:
+            print(f"warning: {arc} is a {delegate} model, which only runs on macOS")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--build", default=str(ROOT / "build"), help="the CMake build dir")
     ap.add_argument("--out-dir", default=str(ROOT / "releases"))
+    ap.add_argument("--stage", help="a release folder (e.g. releases/neural_tilde): copy "
+                    "the build into it and zip all of it, including what's already "
+                    "there, such as help/")
     args = ap.parse_args()
 
     ver = version()
@@ -175,16 +216,22 @@ def main():
     check_imports(dumpbin, binaries)
     need = max(vc_runtime_required(dumpbin, b) for b in binaries)
 
-    names = [arc for arc, _ in files]
-    bad = [n for n in names if n.endswith((".mxo", ".pte", ".ptd")) or n.startswith("help/")]
-    if bad:
-        fail(f"these don't belong in the Windows zip: {bad}")
-
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     zip_path = out_dir / f"neural_tilde_{ver}_windows_x64.zip"
     install = INSTALL_TEXT.format(version=ver, vc_runtime=f"{need[0]}.{need[1]}")
     entries = files + [("INSTALL-windows.txt", None)]
+
+    if args.stage:
+        entries = stage(Path(args.stage), entries, install)
+
+    names = [arc for arc, _ in entries]
+    # Models only as help-patch examples; never macOS bundles.
+    bad = [n for n in names if n.endswith(".mxo") or ".mxo/" in n or
+           (n.endswith((".pte", ".ptd")) and not n.startswith("help/"))]
+    if bad:
+        fail(f"these don't belong in the Windows zip: {bad}")
+    warn_macos_only_models(entries)
 
     def add(zf, arc, data):
         info = zipfile.ZipInfo(f"neural_tilde/{arc}", date_time=ZIP_DATE)
@@ -194,8 +241,7 @@ def main():
 
     with zipfile.ZipFile(zip_path, "w") as zf:
         for arc, src in sorted(entries, key=lambda e: e[0]):
-            add(zf, arc, install.replace("\n", "\r\n").encode() if src is None
-                else src.read_bytes())
+            add(zf, arc, install_bytes(install) if src is None else src.read_bytes())
 
     digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
     (out_dir / (zip_path.name + ".sha256")).write_text(f"{digest}  {zip_path.name}\n")
