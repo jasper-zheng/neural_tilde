@@ -362,7 +362,9 @@ See the table below for a comparison of the two packages:
 If you have a RAVE TorchScript (`.ts`) model exported for `nn~`, you can migrate it to `neural.live~` with the helper in [`python_tools/migrate.py`](python_tools/migrate.py):
 
 ```bash
+# MacOS:
 python -m neural_tilde.migrate musicnet.ts --out musicnet --delegate coreml
+
 # Windows + NVIDIA (see MIGRATE.md):
 python -m neural_tilde.migrate musicnet.ts --out musicnet --delegate cuda --skip-noise-synth
 ```
