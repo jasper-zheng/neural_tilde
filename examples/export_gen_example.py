@@ -7,9 +7,11 @@ This is the simplest possible :class:`GenModule` demo — one method, two inputs
 
 Run::
 
-    python export_gen_example_mini.py [out_name]
+    python export_gen_example.py [out_name] [delegate]
 
-Writes ``<out_name>.pte`` + ``<out_name>.json`` (default stem: ``tiny_gen``).
+Writes ``<out_name>.pte`` + ``<out_name>.json`` (default stem: ``tiny_gen``). The delegate
+defaults to ``coreml`` on macOS and ``cuda`` on Windows (run it from a "Developer PowerShell
+for VS 2022"; pass ``xnnpack`` for a CPU model instead).
 
 If the export errors about ``flatc``, prepend
 ``<executorch>/cmake-out/third-party/flatc_ep/bin`` to ``PATH``.
@@ -62,7 +64,8 @@ class TinyGen(nn.Module):
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     out = sys.argv[1] if len(sys.argv) > 1 else "tiny_gen"
-    delegate = sys.argv[2] if len(sys.argv) > 2 else "coreml"  # e.g. mlx, xnnpack, metal
+    default = "cuda" if sys.platform == "win32" else "coreml"
+    delegate = sys.argv[2] if len(sys.argv) > 2 else default  # e.g. mlx, xnnpack, metal
 
     gm = GenModule(TinyGen())
     gm.register_condition("line_ids", [1, 64], "int64")

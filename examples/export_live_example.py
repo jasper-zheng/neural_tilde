@@ -1,4 +1,4 @@
-"""Example of exporting a streamable conv-net to a Core ML ``.pte`` for ``neural.live~``.
+"""Example of exporting a streamable conv-net to a ``.pte`` for ``neural.live~``.
 
 It demonstrates two extra inputs: an ``attribute`` (``gain``) and a ``condition``
 (``bias``), each registered via ``register_method(inputs=[...])``
@@ -8,7 +8,10 @@ prepend ``<executorch>/cmake-out/third-party/flatc_ep/bin`` to ``PATH``.
 
 Run:
 
-    python export_live_example.py [out_name]
+    python export_live_example.py [out_name] [delegate]
+
+The delegate defaults to ``mlx`` on macOS and ``cuda`` on Windows (run it from a
+"Developer PowerShell for VS 2022"; pass ``xnnpack`` for a CPU model instead).
 
 """
 
@@ -50,7 +53,8 @@ class TinyConvNet(LiveModule):
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     out = sys.argv[1] if len(sys.argv) > 1 else "tiny_stream"
-    delegate = sys.argv[2] if len(sys.argv) > 2 else "mlx"  # e.g. coreml, xnnpack, metal
+    default = "cuda" if sys.platform == "win32" else "mlx"
+    delegate = sys.argv[2] if len(sys.argv) > 2 else default  # e.g. coreml, xnnpack, metal
 
     model = TinyConvNet()
 
@@ -73,9 +77,10 @@ def main() -> None:
         inputs=["gain", "bias"]
     )
 
-    # Lower with the chosen delegate (default "mlx"; pass a 2nd CLI arg to override,
-    # e.g. "xnnpack" for CPU, "coreml" for Apple, "metal" for Apple GPU). For coreml, pass
-    # coreml_compute_units="CPU_AND_NE"/"CPU_AND_GPU"/... to pick the unit (default "ALL").
+    # Lower with the chosen delegate (default "mlx", or "cuda" on Windows; pass a 2nd CLI arg
+    # to override, e.g. "xnnpack" for CPU, "coreml" for Apple, "metal" for Apple GPU). For
+    # coreml, pass coreml_compute_units="CPU_AND_NE"/"CPU_AND_GPU"/... to pick the unit
+    # (default "ALL").
     path = model.export_to_pte(out, delegate=delegate, buffer_size=4096, strict=True)
     print(f"wrote {path} and {path[:-4]}.json")
 

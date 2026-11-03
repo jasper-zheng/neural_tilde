@@ -8,8 +8,11 @@ import contextlib
 import logging
 import os
 import shutil
+import sys
 import tempfile
 from typing import Optional
+
+_APPLE_DELEGATES = ("coreml", "mlx", "metal", "mps")
 
 
 def _executorch_version() -> str:
@@ -25,6 +28,22 @@ def _executorch_version() -> str:
         return version("executorch")
     except Exception:
         return "unknown"
+
+
+def _use_bundled_flatc() -> None:
+    """Windows: point ExecuTorch at the ``flatc.exe`` its wheel ships. ExecuTorch looks for a
+    resource named ``flatc`` (no ``.exe``), misses it, and falls back to a bare ``flatc`` on
+    ``PATH`` — so XNNPACK serialization dies with ``FileNotFoundError: [WinError 2]``. A
+    user-set ``FLATC_EXECUTABLE`` wins."""
+    if os.environ.get("FLATC_EXECUTABLE"):
+        return
+    try:
+        import importlib.resources
+        flatc = importlib.resources.files("executorch.data.bin").joinpath("flatc.exe")
+    except ModuleNotFoundError:
+        return
+    if flatc.is_file():
+        os.environ["FLATC_EXECUTABLE"] = str(flatc)
 
 
 def _make_init_mutable_passes(buffer_fqns):
@@ -79,6 +98,12 @@ def _make_partitioner(delegate: str, coreml_disable_weight_sharing: bool = False
     argument, then the ``NN_COREML_CU`` env var, then the default ``"ALL"``. ``migrate.py``
     passes ``"CPU_AND_NE"`` to keep RAVE bit-correct (its GPU path miscomputes); other models
     may benefit from the GPU under ``"ALL"`` — validate on target."""
+    if sys.platform == "win32":
+        if delegate in _APPLE_DELEGATES:
+            raise ValueError(
+                f"delegate '{delegate}' targets Apple devices and can only be exported on "
+                "macOS; on Windows use 'cuda' (NVIDIA GPU) or 'xnnpack' (CPU).")
+        _use_bundled_flatc()
     if delegate == "portable":
         return []
     if delegate == "xnnpack":

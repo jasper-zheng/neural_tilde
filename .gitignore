@@ -32,3 +32,7 @@ _externals_dev
 _support_dev
 
 build_et_131
+
+examples/*.json
+examples/*.ptd
+examples/*.pte
