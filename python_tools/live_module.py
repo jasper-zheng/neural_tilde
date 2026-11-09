@@ -175,8 +175,10 @@ class LiveModule(_ExporterBase):
 
             logging.info(f"Testing method {method_name} with mc.neural.live~ API")
             x = torch.zeros(4, in_channels, test_buffer_size // in_ratio)
+            # Conditions / noise arrive batched too ([n_batches] + shape[1:]).
+            extra_examples_b4 = list(self._method_extra_examples(method_name, 4))
             with torch.no_grad():
-                y = getattr(self, method_name)(x, *extra_examples)
+                y = getattr(self, method_name)(x, *extra_examples_b4)
 
             if len(y.shape) != 3:
                 raise ValueError(
@@ -228,7 +230,7 @@ class LiveModule(_ExporterBase):
         return [signal] + extras
 
     def _nn_metadata(self, buffer_size: int, delegate: str,
-                     executorch_version: str) -> dict:
+                     executorch_version: str, batch: int = 1) -> dict:
         """Build the ``kind:"live"`` metadata JSON dict (see EXECUTORCH_PROTOCOL.md).
 
         Pure metadata: depends only on the registered methods/specs, so it can be built
@@ -251,7 +253,7 @@ class LiveModule(_ExporterBase):
                     "channels": out_channels, "ratio": out_ratio,
                     "labels": list(getattr(self, f"{name}_output_labels")),
                 },
-                "batch": 1,
+                "batch": int(batch),  # fixed batch baked into the program
                 "dynamic_time": False,
             }
         return {
@@ -285,14 +287,7 @@ class LiveModule(_ExporterBase):
         Args:
             path: output path; ``.pte`` is appended if missing.
             delegate: "xnnpack" (default), "coreml", "mlx", "metal", "cuda", or
-                "portable". All persist cached_conv streaming state across execute() (mlx
-                verified bit-identical to xnnpack). mlx is experimental with narrower op
-                coverage, so some models abort at runtime — validate each exported model on
-                the target. "mps" is legacy: ExecuTorch 1.4 removed it, so it only works
-                from an ExecuTorch 1.3 export env and this runtime can't load it. "metal" (EXPERIMENTAL) whole-graph
-                AOTInductor compile to an embedded Metal .so (needs the ExecuTorch Metal
-                runtime + macOS); cached_conv state persistence across a monolithic AOTI
-                function is UNVERIFIED for streaming — smoke-test before relying on it.
+                "portable". 
                 "cuda" (Windows x64 + NVIDIA) whole-graph AOTInductor compile to Triton
                 kernels in a DLL embedded in the .pte, with the weights in a ``<name>.ptd``
                 beside it; streaming state persists. Exporting needs a CUDA torch, an NVIDIA
@@ -320,7 +315,7 @@ class LiveModule(_ExporterBase):
 
         # Build metadata first so a bad ratio/label fails before the heavy lift.
         metadata = self._nn_metadata(buffer_size, delegate,
-                                     _executorch_version())
+                                     _executorch_version(), batch)
 
         try:
             from executorch.exir import EdgeCompileConfig, to_edge_transform_and_lower
@@ -344,7 +339,7 @@ class LiveModule(_ExporterBase):
             # Audio tensor, then one example tensor per extra input, in order.
             example = (torch.zeros(batch, in_channels,
                                    buffer_size // in_ratio),
-                       ) + self._method_extra_examples(name)
+                       ) + self._method_extra_examples(name, batch)
             wrapper = _MethodWrapper(self, name).eval()
             # Allocate (and zero) lazy streaming buffers BEFORE tracing, so they are
             # captured as persistent mutable state — otherwise the model streams cold

@@ -251,7 +251,7 @@ model.register_method("forward", in_channels=2, in_ratio=1,
                       )
 
 # Export the model with Core ML delegate:
-model.export_to_pte("mini-live", delegate="coreml", buffer_size=4096)
+model.export_to_pte("mini-live", delegate="coreml", buffer_size=4096, batch=1)
 ```
 
 To run the above example:

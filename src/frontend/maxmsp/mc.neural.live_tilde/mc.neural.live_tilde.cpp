@@ -1,5 +1,7 @@
 #include "../../../backend/backend.h"
 #include "../shared/circular_buffer.h"
+#include "../shared/live_attrs.h"  // LiveAttrs, rebuild_live_attrs
+#include "../shared/live_inputs.h" // LiveInputs (conditions + matrix noise)
 #include "../shared/neural_common.h"
 #include "../shared/runtime_console.h" // console sink, prepare_and_report
 #include "c74_min.h"
@@ -50,8 +52,15 @@ public:
   std::atomic<bool> m_prepared{false};
   void reload_model(); // bare `reload`
   std::string m_method;
-  std::vector<std::string> settable_attributes;
-  bool has_settable_attribute(std::string attribute);
+  // The model's Attribute-role inputs as dynamic Max attributes (see
+  // shared/live_attrs.h); m_attrs.live is fed to Backend::perform each block.
+  LiveAttrs m_attrs;
+  // Condition + matrix-noise inputs (see shared/live_inputs.h): one control
+  // inlet per condition, then one jit_matrix inlet per matrix noise, after the
+  // signal inlets. m_inputs.supplied is fed to Backend::perform each block.
+  LiveInputs m_inputs;
+  int m_cond_inlet_base = 0;  // index of the first condition inlet
+  int m_noise_inlet_base = 0; // index of the first matrix-noise inlet
   // Absolute path to the model's .pte (derived from its .json metadata via
   // resolve_model_pte; the .pte may be absent — see backend load()).
   std::string m_path;
@@ -101,8 +110,8 @@ public:
   // RNG SEED ATTRIBUTE
   // Base seed for the model's noise inputs (each noise input draws from its own
   // (seed, name) stream; see Backend::set_seed). The metadata `seed` is the
-  // default, synced after load. (Matrix-noise inlets are not exposed on the mc
-  // variant — only the seeded streams.)
+  // default, synced after load. A matrix-noise input fed from its jit_matrix
+  // inlet (with `<name>_inlet` on) replaces its seeded stream.
     attribute<int> seed {this, "seed", 0,
         description{"RNG seed for noise inputs (reproducible noise)."},
         setter{
@@ -133,61 +142,90 @@ public:
         return {};
       }};
 
-  message<> anything{this, "anything", "callback for attributes",
-                     MIN_FUNCTION{symbol attribute_name = args[0];
-  if (attribute_name == "reload") {
-    reload_model();
-  } else if (attribute_name == "get_attributes") {
-    for (std::string attr : settable_attributes) {
-      cout << attr << endl;
-    }
-    return {};
-  } else if (attribute_name == "get_methods") {
-    for (std::string method : m_model->get_available_methods())
-      cout << method << endl;
-    return {};
-  } else if (attribute_name == "get") {
-    if (args.size() < 2) {
-      cerr << "get must be given an attribute name" << endl;
-      return {};
-    }
-    attribute_name = args[1];
-    if (m_model->has_settable_attribute(attribute_name)) {
-      cout << attribute_name << ": "
-           << m_model->get_attribute_as_string(attribute_name) << endl;
-    } else {
-      cerr << "no attribute " << attribute_name << " found in model" << endl;
-    }
-    return {};
-  } else if (attribute_name == "set") {
-    if (args.size() < 3) {
-      cerr << "set must be given an attribute name and corresponding arguments"
-           << endl;
-      return {};
-    }
-    attribute_name = args[1];
-    std::vector<std::string> attribute_args;
-    if (has_settable_attribute(attribute_name)) {
-      for (int i = 2; i < args.size(); i++) {
-        attribute_args.push_back(args[i]);
-      }
-      try {
-        m_model->set_attribute(attribute_name, attribute_args);
-      } catch (std::string message) {
-        cerr << message << endl;
-      }
-    } else {
-      cerr << "model does not have attribute " << attribute_name << endl;
-    }
-  } else {
-    cerr << "no corresponding method for " << attribute_name << endl;
-  }
-  return {};
-}
-}
-;
-}
-;
+  // Conditioning as a bare list on a condition inlet: assigned to the condition
+  // input at THIS inlet's position (the alternative to the by-name dictionary
+  // path). Shared across every batch (the backend replicates it).
+  message<> list_msg{
+      this, "list", "Conditioning values for this inlet's condition input.",
+      MIN_FUNCTION {
+        m_inputs.receive_list(args, inlet, m_cond_inlet_base, cerr);
+        return {};
+      }};
+
+  // A bare float/int on a condition inlet: a single-element list (min-api maps
+  // "number" -> "float" and auto-generates the matching "int").
+  message<> number_msg{
+      this, "number",
+      "A single conditioning value for this inlet's condition input.",
+      MIN_FUNCTION {
+        m_inputs.receive_list(args, inlet, m_cond_inlet_base, cerr);
+        return {};
+      }};
+
+  // Conditioning as a Max dictionary, matched BY KEY NAME against the model's
+  // condition inputs and MERGED (so several dicts on any inlet accumulate).
+  message<> dictionary_msg{
+      this, "dictionary",
+      "Receive conditioning as a dictionary; merged by key name.", MIN_FUNCTION {
+        m_inputs.receive_dict(args, cerr);
+        return {};
+      }};
+
+  // A Jitter matrix on a matrix-noise inlet: used as this inlet's noise input
+  // (shared across every batch) while its `<name>_inlet` toggle is on.
+  message<> jit_matrix_msg{
+      this, "jit_matrix",
+      "Float32 Jitter matrix used as this inlet's noise input "
+      "(enable with attribute: '[name]_inlet').",
+      [this](const atoms &args, const int inlet) -> atoms {
+        m_inputs.receive_matrix(args, inlet, m_noise_inlet_base, cerr);
+        return {};
+      }};
+
+  message<> anything{
+      this, "anything", "Set a model attribute (e.g. gain 0.5), or reload / get_methods.",
+      [this](const c74::min::atoms &args, const int inlet) -> c74::min::atoms {
+        // The model's settable scalars are dynamic Max attributes (see
+        // shared/live_attrs.h) added per-instance AFTER class registration, so
+        // Max's message dispatch doesn't route to them natively (the inspector /
+        // @box-args reach them directly) — this catch-all backs the bare
+        // `<name> <value>` form, plus nn~-style `set` / `get` aliases.
+        c74::max::t_object *self = (c74::max::t_object *)(*this);
+        std::string sel = args[0];
+        if (sel == "reload") {
+          reload_model();
+        } else if (sel == "get_methods") {
+          for (std::string method : m_model->get_available_methods())
+            cout << method << endl;
+        } else if (sel == "get_attributes") {
+          for (const auto &s : m_attrs.slots)
+            cout << s.name << endl;
+        } else if (sel == "get") {
+          if (args.size() < 2) {
+            cerr << "get must be given an attribute name" << endl;
+            return {};
+          }
+          std::string name = args[1];
+          if (m_attrs.is_attr(name))
+            cout << name << ": " << m_attrs.load(name.c_str()) << endl;
+          else
+            cerr << "no attribute '" << name << "'" << endl;
+        } else if (sel == "set") {
+          if (args.size() < 3) {
+            cerr << "set must be given an attribute name and a value" << endl;
+            return {};
+          }
+          std::string name = args[1];
+          if (!set_live_attr(self, m_attrs, name, (double)args[2]))
+            cerr << "no attribute '" << name << "'" << endl;
+        } else if (m_attrs.is_attr(sel) && args.size() >= 2) {
+          set_live_attr(self, m_attrs, sel, (double)args[1]); // bare `<name> <value>`
+        } else {
+          cerr << "no method/attribute '" << sel << "'" << endl;
+        }
+        return {};
+      }};
+};
 
 int mc_live::get_batches() {
   return *std::min_element(chans.begin(), chans.end());
@@ -204,7 +242,8 @@ void model_perform(mc_live *mc_nn_instance) {
 
   mc_nn_instance->m_model->perform(
       in_model, out_model, mc_nn_instance->m_buffer_size,
-      mc_nn_instance->m_method, mc_nn_instance->get_batches());
+      mc_nn_instance->m_method, mc_nn_instance->get_batches(),
+          mc_nn_instance->m_attrs.live, mc_nn_instance->m_inputs.supplied);
 }
 
 void check_loop_buffers(mc_live *mc_nn_instance, std::vector<float *> &in_model, std::vector<float *> &out_model) {
@@ -238,7 +277,8 @@ void model_perform_loop(mc_live *mc_nn_instance) {
             std::chrono::milliseconds(200))) {
       mc_nn_instance->m_model->perform(
           in_model, out_model, mc_nn_instance->m_buffer_size,
-          mc_nn_instance->m_method, mc_nn_instance->get_batches());
+          mc_nn_instance->m_method, mc_nn_instance->get_batches(),
+          mc_nn_instance->m_attrs.live, mc_nn_instance->m_inputs.supplied);
       mc_nn_instance->m_result_available_lock.release();
     }
   }
@@ -302,10 +342,6 @@ mc_live::mc_live(const atoms &args)
   // GET MODEL'S METHOD PARAMETERS
   auto params = m_model->get_method_params(m_method);
 
-  try {
-    settable_attributes = m_model->get_settable_attributes();
-  } catch (...) {
-  }
 
   if (!params.size()) {
     error("method " + m_method + " not found !");
@@ -346,6 +382,17 @@ mc_live::mc_live(const atoms &args)
     m_in_model.push_back(std::make_unique<float[]>(m_buffer_size));
   }
 
+  // Control inlets after the signal inlets (fixed at construction): one per
+  // condition-role input, then one jit_matrix inlet per matrix-drivable noise
+  // input (see shared/live_inputs.h). Their values are shared across batches.
+  m_inputs.build(m_model.get(), m_method, cerr);
+  m_cond_inlet_base = (int)m_inlets.size();
+  for (const auto &label : LiveInputs::condition_labels(m_model.get(), m_method))
+    m_inlets.push_back(std::make_unique<inlet<>>(this, label));
+  m_noise_inlet_base = (int)m_inlets.size();
+  for (const auto &label : m_inputs.noise_labels())
+    m_inlets.push_back(std::make_unique<inlet<>>(this, label));
+
   m_out_buffer = std::make_unique<circular_buffer<float, double>[]>(
       m_out_dim * get_batches());
   auto output_labels = m_model->get_output_labels(m_method);
@@ -360,31 +407,31 @@ mc_live::mc_live(const atoms &args)
     m_out_model.push_back(std::make_unique<float[]>(m_buffer_size));
   }
 
+  // Expose the model's settable scalars as dynamic Max attributes (inspector /
+  // @box-args / bare `<name> <value>`). Done before the perform thread starts.
+  rebuild_live_attrs<mc_live>((c74::max::t_object *)(*this), m_attrs, m_model.get(),
+                              m_method);
+  rebuild_noise_inlet_attrs<mc_live>((c74::max::t_object *)(*this), m_inputs);
+
   if (m_use_thread)
     m_compute_thread = std::make_unique<std::thread>(model_perform_loop, this);
 }
 
-bool mc_live::has_settable_attribute(std::string attribute) {
-  for (std::string candidate : settable_attributes) {
-    if (candidate == attribute)
-      return true;
-  }
-  return false;
-}
-
+// Re-size the buffers for a new batch count (the MC channel count changed).
+// m_in_dim / m_out_dim stay the model's per-batch channel counts (= the number
+// of signal inlets / outlets); the buffers hold dim * batches channels.
 void mc_live::reset_buffers() {
-  auto params = m_model->get_method_params(m_method);
-  m_in_dim = params[0] * get_batches();
-  m_out_dim = params[2] * get_batches();
-  m_in_buffer = std::make_unique<circular_buffer<double, float>[]>(m_in_dim);
-  m_out_buffer = std::make_unique<circular_buffer<float, double>[]>(m_out_dim);
+  const int n_in = m_in_dim * get_batches();
+  const int n_out = m_out_dim * get_batches();
+  m_in_buffer = std::make_unique<circular_buffer<double, float>[]>(n_in);
+  m_out_buffer = std::make_unique<circular_buffer<float, double>[]>(n_out);
   m_in_model.clear();
   m_out_model.clear();
-  for (int i(0); i < m_in_dim; i++) {
+  for (int i(0); i < n_in; i++) {
     m_in_buffer[i].initialize(m_buffer_size);
     m_in_model.push_back(std::make_unique<float[]>(m_buffer_size));
   }
-  for (int i(0); i < m_out_dim; i++) {
+  for (int i(0); i < n_out; i++) {
     m_out_buffer[i].initialize(m_buffer_size);
     m_out_model.push_back(std::make_unique<float[]>(m_buffer_size));
   }
@@ -401,6 +448,13 @@ void mc_live::reload_model() {
   if (!m_model->reload() && m_model->is_loaded())
     m_prepared = prepare_and_report(*m_model, m_method, m_path,
                                     (c74::max::t_object *)(*this));
+  // Rebuild the attributes and re-resolve the condition / matrix-noise inputs
+  // (clears held values, as neural.live~ does on reload). The worker is
+  // stopped, so this is safe; the inlets, fixed at construction, do not change.
+  rebuild_live_attrs<mc_live>((c74::max::t_object *)(*this), m_attrs, m_model.get(),
+                              m_method);
+  m_inputs.build(m_model.get(), m_method, cerr);
+  rebuild_noise_inlet_attrs<mc_live>((c74::max::t_object *)(*this), m_inputs);
   m_should_stop_perform_thread = false;
   if (m_use_thread)
     m_compute_thread = std::make_unique<std::thread>(model_perform_loop, this);
@@ -447,9 +501,10 @@ void mc_live::operator()(audio_bundle input, audio_bundle output) {
 void mc_live::perform(audio_bundle input, audio_bundle output) {
   auto vec_size = input.frame_count();
 
-  // COPY INPUT TO CIRCULAR BUFFER
+  // COPY INPUT TO CIRCULAR BUFFER (signal inlets only: one per model input
+  // channel; the condition / matrix-noise control inlets follow them)
   int dim_offset = 0;
-  for (int i(0); i < m_inlets.size(); i++) {
+  for (int i(0); i < m_in_dim; i++) {
     for (int b(0); b < get_batches(); b++) {
       auto in = input.samples(dim_offset + b);
       m_in_buffer[i * get_batches() + b].put(in, vec_size);
@@ -459,6 +514,10 @@ void mc_live::perform(audio_bundle input, audio_bundle output) {
 
   if (m_in_buffer[0].full()) { // BUFFER IS FULL
     if (!m_use_thread) {
+      // Single-threaded: inference runs on this thread below, so refreshing the
+      // held conditioning + matrix noise here cannot race the model's read.
+      m_inputs.snapshot();
+
       // TRANSFER MEMORY BETWEEN INPUT CIRCULAR BUFFER AND MODEL BUFFER
       for (int c(0); c < m_in_dim * get_batches(); c++)
         m_in_buffer[c].get(m_in_model[c].get(), m_buffer_size);
@@ -467,16 +526,21 @@ void mc_live::perform(audio_bundle input, audio_bundle output) {
       model_perform(this);
 
       // TRANSFER MEMORY BETWEEN OUTPUT CIRCULAR BUFFER AND MODEL BUFFER
-      for (int c(0); c < m_out_dim; c++)
+      for (int c(0); c < m_out_dim * get_batches(); c++)
         m_out_buffer[c].put(m_out_model[c].get(), m_buffer_size);
 
     } else if (m_result_available_lock.try_acquire()) {
+      // The worker finished the previous block and is parked until the release
+      // below, so it is NOT reading m_inputs.supplied: refreshing the held
+      // conditioning + matrix noise is safe ONLY here.
+      m_inputs.snapshot();
+
       // TRANSFER MEMORY BETWEEN INPUT CIRCULAR BUFFER AND MODEL BUFFER
-      for (int c(0); c < m_in_dim; c++)
+      for (int c(0); c < m_in_dim * get_batches(); c++)
         m_in_buffer[c].get(m_in_model[c].get(), m_buffer_size);
 
       // TRANSFER MEMORY BETWEEN OUTPUT CIRCULAR BUFFER AND MODEL BUFFER
-      for (int c(0); c < m_out_dim; c++)
+      for (int c(0); c < m_out_dim * get_batches(); c++)
         m_out_buffer[c].put(m_out_model[c].get(), m_buffer_size);
 
       // SIGNAL PERFORM THREAD THAT DATA IS AVAILABLE
@@ -486,9 +550,9 @@ void mc_live::perform(audio_bundle input, audio_bundle output) {
 
   // COPY CIRCULAR BUFFER TO OUTPUT
   for (int b(0); b < get_batches(); b++) {
-    for (int d(0); d < m_outlets.size(); d++) {
+    for (int d(0); d < m_out_dim; d++) {
       auto out = output.samples(d * get_batches() + b);
-      m_out_buffer[b * m_outlets.size() + d].get(out, vec_size);
+      m_out_buffer[b * m_out_dim + d].get(out, vec_size);
     }
   }
 }
@@ -502,6 +566,10 @@ long simplemc_multichanneloutputs(c74::max::t_object *x, long index,
 long simplemc_inputchanged(c74::max::t_object *x, long index, long count) {
   minwrap<mc_live> *ob = (minwrap<mc_live> *)(x);
   bool needs_refresh = false;
+  // Max reports every inlet; only the signal inlets (one per model input
+  // channel) are tracked — the condition / matrix-noise inlets follow them.
+  if (index < 0 || index >= (long)ob->m_min_object.chans.size())
+    return false;
   if (ob->m_min_object.chans[index] != count) {
     auto old_n_batch = ob->m_min_object.get_batches();
     ob->m_min_object.chans[index] = count;

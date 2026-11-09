@@ -142,15 +142,23 @@ class _ExporterBase(torch.nn.Module):
             (f'Unknown input "{name}" — call register_attribute / register_noise / '
              "register_condition / register_buffer_input before register_method"))
 
-    def _extra_example(self, name: str) -> torch.Tensor:
-        """A zero example tensor for a registered extra input (for tracing/testing)."""
+    def _extra_example(self, name: str, batch: int = 1) -> torch.Tensor:
+        """A zero example tensor for a registered extra input (for tracing/testing).
+
+        A non-attribute input's declared leading dim is a batch placeholder of 1:
+        the example uses ``batch`` there instead, matching what the live host sends
+        (``[n_batches] + shape[1:]``). Attributes are always a scalar ``[1]``.
+        """
         spec = self._extra_spec(name)
         torch_dtype = (torch.int64 if spec["dtype"] == "int64"
                        else torch.int32 if spec["dtype"] == "int32"
                        else torch.float32)
         if spec["role"] == "attribute":
             return torch.tensor([spec["default"]], dtype=torch_dtype)
-        return torch.zeros(spec["shape"], dtype=torch_dtype)
+        shape = list(spec["shape"])
+        if shape:
+            shape[0] = int(batch)
+        return torch.zeros(shape, dtype=torch_dtype)
 
     # ------------------------------------------------------------------ method
 
@@ -170,9 +178,10 @@ class _ExporterBase(torch.nn.Module):
         """The ordered extra-input names a method consumes (empty if none)."""
         return list(getattr(self, f"{method_name}_inputs", []))
 
-    def _method_extra_examples(self, method_name: str) -> tuple:
-        """Zero example tensors for a method's extra inputs, in declared order."""
-        return tuple(self._extra_example(a)
+    def _method_extra_examples(self, method_name: str, batch: int = 1) -> tuple:
+        """Zero example tensors for a method's extra inputs, in declared order
+        (non-attribute inputs batched to ``batch``; see ``_extra_example``)."""
+        return tuple(self._extra_example(a, batch)
                      for a in self._method_input_names(method_name))
 
     def _prime_streaming_buffers(self, method_name: str, example: tuple) -> list:

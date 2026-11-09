@@ -202,7 +202,7 @@ public:
 
   // attr_values (optional): current value of each Attribute-role input, in
   // declared order; a value not supplied (shorter list / empty) falls back to
-  // the metadata default, so attribute-less callers (mc/mcs) pass nothing.
+  // the metadata default, so attribute-less callers may pass nothing.
   // supplied (optional): externally-supplied inputs by name (Condition-role for
   // live); an unsupplied condition is zero-filled.
   void perform(std::vector<float *> in_buffer, std::vector<float *> out_buffer,

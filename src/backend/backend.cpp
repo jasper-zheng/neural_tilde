@@ -761,7 +761,7 @@ void Backend::perform(std::vector<float *> in_buffer,
       break;
     case Role::Attribute: {
       // Scalar [1] control: the caller's value by declared-order index, else the
-      // metadata default (so attribute-less callers like mc/mcs pass nothing).
+      // metadata default (so attribute-less callers may pass nothing).
       const double v = attr_i < attr_values.size()
                            ? (double)attr_values[attr_i]
                            : spec.def;

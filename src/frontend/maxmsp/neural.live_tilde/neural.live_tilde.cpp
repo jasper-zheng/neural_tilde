@@ -1,8 +1,7 @@
 #include "../../../backend/backend.h"
 #include "../shared/circular_buffer.h"
-#include "../shared/cond_bytes.h"
-#include "../shared/cond_label.h"   // cond_inlet_label
-#include "../shared/matrix_noise.h" // MatrixNoise, detect_matrix_noise, read_jit_matrix
+#include "../shared/live_attrs.h"   // LiveAttrs, rebuild_live_attrs
+#include "../shared/live_inputs.h"  // LiveInputs (conditions + matrix noise)
 #include "../shared/neural_common.h"
 #include "../shared/runtime_console.h" // console sink, prepare_and_report
 #include "c74_min.h"
@@ -22,11 +21,6 @@
 
 using namespace c74::min;
 
-// ScalarType element size in bytes (Long is 8; Int / Float are 4). Used to turn
-// a condition's byte buffer back into an element count for the backend.
-static size_t live_dtype_size(executorch::aten::ScalarType t) {
-  return t == executorch::aten::ScalarType::Long ? 8 : 4;
-}
 
 class live : public object<live>, public vector_operator<> {
 public:
@@ -60,86 +54,18 @@ public:
 
   // DYNAMIC ATTRIBUTES --------------------------------------------------------
   // One Max instance attribute per settable scalar the model's method declares,
-  // created from the metadata at load (the same design as neural.gen~). The model
-  // consumes each as a trailing scalar input to its forward; the host owns the
-  // value. m_attr_slots holds the metadata (name/range/default/description);
-  // m_attr_live is the parallel live value, written by the attribute setter
-  // (control thread) and snapshotted by perform (audio/worker thread).
-  struct AttrSlot {
-    std::string name;
-    double min, max, def;
-    std::string description;
-  };
-  std::vector<AttrSlot> m_attr_slots;
-  std::vector<float> m_attr_live;
-  void add_dynamic_attributes();
-  bool is_attr(const std::string &name) const;
-  void set_attr(const std::string &name, double value);
-  void attr_store(const char *name, double value); // setter -> m_attr_live
-  double attr_load(const char *name) const;        // getter <- m_attr_live
-  // perform feeds m_attr_live to the model directly (by const-ref) in slot order;
-  // the per-float race with the setter is benign (a value-copy was never atomic).
-  // Raw Max attribute accessors for the dynamically-created attributes (recover
-  // the instance via the Min wrapper; identify the attribute by its name).
-  static c74::max::t_max_err attr_get(c74::max::t_object *x,
-                                      c74::max::t_object *attr, long *ac,
-                                      c74::max::t_atom **av);
-  static c74::max::t_max_err attr_set(c74::max::t_object *x,
-                                      c74::max::t_object *attr, long ac,
-                                      c74::max::t_atom *av);
+  // created from the metadata at load (shared with mc/mcs: shared/live_attrs.h).
+  // m_attrs.live is passed to the model directly in slot order each block.
+  LiveAttrs m_attrs;
 
-  // CONDITION INPUTS --------------------------------------------------------
-  // A `condition`-role input is a held control vector the patch supplies as a
-  // `list` on the condition's control inlet (by position) or a `dictionary`
-  // (matched by name). It is held across blocks until updated; unsupplied
-  // conditions are zero-filled by the backend. The control thread writes
-  // m_cond under m_cond_mutex and sets m_cond_dirty; the audio thread snapshots
-  // it into m_supplied (try_lock, reuse last on contention) and hands it to
-  // perform — the snapshot/perform handoff is ordered by the worker semaphores,
-  // so the worker reads a stable m_supplied while the next block waits.
-  std::vector<std::string> m_cond_names;           // condition names, declared order
-  std::map<std::string, std::pair<executorch::aten::ScalarType, size_t>>
-      m_cond_meta;                                 // name -> (dtype, per-batch numel)
-  std::map<std::string, std::vector<char>> m_cond; // control thread (under mutex)
-  std::mutex m_cond_mutex;
-  std::atomic<bool> m_cond_dirty{false};
-  std::map<std::string, std::vector<char>> m_cond_snapshot; // audio thread
-  std::map<std::string, SuppliedInput> m_supplied;          // -> perform()
-  void build_condition_meta();
-  void snapshot_conditions();
-  void receive_list(const atoms &args, int inlet);
-  void receive_dict(const atoms &args);
-
-  // MATRIX NOISE INPUTS ------------------------------------------------------
-  // A `noise`-role input whose shape folds to a Jitter matrix gets its own
-  // jit_matrix inlet (after the condition inlets) + a `<name>_inlet` boolean
-  // attribute. When the toggle is on and a valid matrix has arrived, perform
-  // feeds it (via the shared m_supplied map, matched by name) instead of the
-  // seeded per-input stream. Threading mirrors the conditions: the scheduler
-  // thread writes m_noise / m_noise_enabled under m_noise_mutex and sets
-  // m_noise_dirty; the audio thread snapshots into m_noise_snapshot (which
-  // m_supplied points into) at the worker handoff. The geometry + matrix read
-  // live in shared/matrix_noise.h (also used by neural.gen~).
-  std::vector<MatrixNoise> m_matrix_noise;       // foldable noise inputs (per load)
-  std::map<int, std::string> m_noise_inlet_name; // absolute inlet idx -> noise name
-  std::vector<std::string> m_noise_attr_slots;   // <name>_inlet attrs (for cleanup)
-  std::map<std::string, std::vector<float>> m_noise;   // control thread (under mutex)
-  std::map<std::string, bool> m_noise_enabled;        // <name>_inlet toggle, by name
-  std::mutex m_noise_mutex;
-  std::atomic<bool> m_noise_dirty{false};
-  std::map<std::string, std::vector<float>> m_noise_snapshot; // audio thread
-  void build_matrix_noise_meta();
-  void snapshot_noise();
-  void receive_matrix(const atoms &args, int inlet);
-  void add_noise_inlet_attributes();
-  // Raw accessors for the `<name>_inlet` boolean attributes (strip the suffix
-  // to key m_noise_enabled by the noise input name).
-  static c74::max::t_max_err noise_inlet_get(c74::max::t_object *x,
-                                             c74::max::t_object *attr, long *ac,
-                                             c74::max::t_atom **av);
-  static c74::max::t_max_err noise_inlet_set(c74::max::t_object *x,
-                                             c74::max::t_object *attr, long ac,
-                                             c74::max::t_atom *av);
+  // CONDITION + MATRIX NOISE INPUTS ----------------------------------------
+  // One control inlet per condition-role input (after the signal inlets), then
+  // one jit_matrix inlet per matrix-drivable noise input (+ `<name>_inlet`
+  // toggle). State, snapshot threading and the toggles live in
+  // shared/live_inputs.h; m_inputs.supplied is handed to perform.
+  LiveInputs m_inputs;
+  int m_cond_inlet_base = 0;  // index of the first condition inlet
+  int m_noise_inlet_base = 0; // index of the first matrix-noise inlet
 
   // BUFFER RELATED MEMBERS
   int m_buffer_size;
@@ -257,15 +183,15 @@ public:
                     }
                     // Rebuild the model's settable scalars as Max attributes (the
                     // perform thread is stopped above, so this is safe).
-                    add_dynamic_attributes();
-                    // Re-resolve the condition inputs for the new model (the
-                    // condition inlets, fixed at construction, do not change).
-                    build_condition_meta();
-                    // Re-resolve the matrix-noise inputs + their toggle attributes
-                    // (the jit_matrix inlets, fixed at construction, do not change);
-                    // re-sync the seed attribute onto the new metadata default.
-                    build_matrix_noise_meta();
-                    add_noise_inlet_attributes();
+                    rebuild_live_attrs<live>((c74::max::t_object *)(*this), m_attrs,
+                             m_model.get(), m_method);
+                    // Re-resolve the condition + matrix-noise inputs and the
+                    // noise toggle attributes for the new model (the inlets, fixed
+                    // at construction, do not change); re-sync the seed attribute
+                    // onto the new metadata default.
+                    m_inputs.build(m_model.get(), m_method, cerr);
+                    rebuild_noise_inlet_attrs<live>((c74::max::t_object *)(*this),
+                                                    m_inputs);
                     seed = m_model->gen_seed();
                     // Adopt the model's exported (fixed) buffer size; see ctor.
                     m_buffer_size = negotiate_buffer_size(
@@ -301,7 +227,7 @@ public:
   message<> list_msg{
       this, "list", "Conditioning values for this inlet's condition input.",
       MIN_FUNCTION {
-        receive_list(args, inlet);
+        m_inputs.receive_list(args, inlet, m_cond_inlet_base, cerr);
         return {};
       }};
 
@@ -314,7 +240,7 @@ public:
       this, "number",
       "A single conditioning value for this inlet's condition input.",
       MIN_FUNCTION {
-        receive_list(args, inlet);
+        m_inputs.receive_list(args, inlet, m_cond_inlet_base, cerr);
         return {};
       }};
 
@@ -323,7 +249,7 @@ public:
   message<> dictionary_msg{
       this, "dictionary",
       "Receive conditioning as a dictionary; merged by key name.", MIN_FUNCTION {
-        receive_dict(args);
+        m_inputs.receive_dict(args, cerr);
         return {};
       }};
 
@@ -335,7 +261,7 @@ public:
       "Float32 Jitter matrix used as this inlet's noise input "
       "(enable with attribute: '[name]_inlet').",
       [this](const atoms &args, const int inlet) -> atoms {
-        receive_matrix(args, inlet);
+        m_inputs.receive_matrix(args, inlet, m_noise_inlet_base, cerr);
         return {};
       }};
 
@@ -343,7 +269,7 @@ public:
       this, "anything", "callback for attributes",
       [this](const c74::min::atoms &args, const int inlet) -> c74::min::atoms {
         // reload/get_methods are model-level controls. The model's settable
-        // scalars are dynamic Max attributes (see add_dynamic_attributes) added
+        // scalars are dynamic Max attributes (see shared/live_attrs.h) added
         // per-instance AFTER class registration, so Max's message dispatch
         // doesn't route to them natively (the inspector / @box-args reach them
         // directly) — this catch-all backs the bare `<name> <value>` form.
@@ -351,8 +277,9 @@ public:
         if (sel == "get_methods") {
           for (std::string method : m_model->get_available_methods())
             cout << method << endl;
-        } else if (is_attr(sel) && args.size() >= 2) {
-          set_attr(sel, (double)args[1]); // bare `<name> <value>`
+        } else if (m_attrs.is_attr(sel) && args.size() >= 2) {
+          set_live_attr((c74::max::t_object *)(*this), m_attrs, sel,
+                        (double)args[1]); // bare `<name> <value>`
         } else {
           cerr << "no method/attribute '" << sel << "'" << endl;
         }
@@ -369,7 +296,7 @@ void model_perform(live *nn_instance) {
 
   nn_instance->m_model->perform(in_model, out_model, nn_instance->m_buffer_size,
                                 nn_instance->m_method, 1,
-                                nn_instance->m_attr_live, nn_instance->m_supplied);
+                                nn_instance->m_attrs.live, nn_instance->m_inputs.supplied);
 }
 
 void live::model_perform_loop(live *nn_instance) {
@@ -387,8 +314,8 @@ void live::model_perform_loop(live *nn_instance) {
       nn_instance->m_model->perform(in_model, out_model,
                                     nn_instance->m_buffer_size,
                                     nn_instance->m_method, 1,
-                                    nn_instance->m_attr_live,
-                                    nn_instance->m_supplied);
+                                    nn_instance->m_attrs.live,
+                                    nn_instance->m_inputs.supplied);
       nn_instance->m_result_available_lock.release();
     }
   }
@@ -460,10 +387,9 @@ live::live(const atoms &args)
 
   // Resolve the model's condition-role inputs (their names/dtypes/sizes) so the
   // ctor can give each its own control inlet and perform() can bind them.
-  build_condition_meta();
-  // Resolve the matrix-drivable noise inputs (geometry per load) so the ctor can
-  // give each its own jit_matrix inlet + `<name>_inlet` toggle.
-  build_matrix_noise_meta();
+  // Also resolve the matrix-drivable noise inputs (geometry per load) so the
+  // ctor can give each its own jit_matrix inlet + `<name>_inlet` toggle.
+  m_inputs.build(m_model.get(), m_method, cerr);
 
   // ExecuTorch programs are exported at a fixed buffer size (the time dim is
   // baked into the .pte unless dynamic); the host block size must match it.
@@ -486,31 +412,18 @@ live::live(const atoms &args)
 
   // One control inlet per condition-role input, after the signal inlets (fixed
   // at construction; a later reload to a different condition set keeps these,
-  // while the by-name dictionary path still reaches every condition). Label each
-  // with the tensor it expects (name + shape + dtype + optional description),
-  // built from the same method_inputs() the condition order derives from.
-  for (const auto &in : m_model->method_inputs(m_method)) {
-    if (in.role != Role::Condition)
-      continue;
-    m_inlets.push_back(std::make_unique<inlet<>>(
-        this, cond_inlet_label(in) + " (list, or dictionary by name)"));
-  }
+  // while the by-name dictionary path still reaches every condition). Each is
+  // labelled with the tensor it expects (name + shape + dtype + description).
+  m_cond_inlet_base = (int)m_inlets.size();
+  for (const auto &label : LiveInputs::condition_labels(m_model.get(), m_method))
+    m_inlets.push_back(std::make_unique<inlet<>>(this, label));
 
   // One jit_matrix inlet per matrix-drivable noise input, after the condition
   // inlets (also fixed at construction; the `<name>_inlet` toggle picks the
-  // matrix over the seeded stream per block — see receive_matrix / snapshot_noise).
-  {
-    int base = (int)m_inlets.size();
-    for (size_t i = 0; i < m_matrix_noise.size(); i++) {
-      const auto &nz = m_matrix_noise[i];
-      std::string label = nz.name + " noise (jit_matrix " +
-                          std::to_string(nz.n0) + " float32/float64 " +
-                          std::to_string(nz.n2) + " " + std::to_string(nz.n1) +
-                          "); enable @" + nz.name + "_inlet";
-      m_inlets.push_back(std::make_unique<inlet<>>(this, label));
-      m_noise_inlet_name[base + (int)i] = nz.name;
-    }
-  }
+  // matrix over the seeded stream per block — see shared/live_inputs.h).
+  m_noise_inlet_base = (int)m_inlets.size();
+  for (const auto &label : m_inputs.noise_labels())
+    m_inlets.push_back(std::make_unique<inlet<>>(this, label));
 
   m_out_buffer = std::make_unique<circular_buffer<float, double>[]>(m_out_dim);
   auto output_labels = m_model->get_output_labels(m_method);
@@ -527,10 +440,11 @@ live::live(const atoms &args)
 
   // Expose the model's settable scalars as dynamic Max attributes (inspector /
   // @box-args / get-set). Done before the perform thread starts.
-  add_dynamic_attributes();
+  rebuild_live_attrs<live>((c74::max::t_object *)(*this), m_attrs,
+                             m_model.get(), m_method);
   // One `<name>_inlet` boolean attribute per matrix-noise input (toggles the
   // matrix inlet over the seeded stream).
-  add_noise_inlet_attributes();
+  rebuild_noise_inlet_attrs<live>((c74::max::t_object *)(*this), m_inputs);
   // Adopt the metadata's default seed onto the `seed` attribute (fires set_seed).
   seed = m_model->gen_seed();
 
@@ -547,113 +461,6 @@ live::~live() {
   m_should_stop_perform_thread = true;
   if (m_compute_thread)
     m_compute_thread->join();
-}
-
-// --- Dynamic attributes -----------------------------------------------------
-// The model's settable scalars become Max instance attributes (the same design
-// as neural.gen_tilde.cpp's add_dynamic_attributes), each fed to the model as a
-// trailing forward input. The custom getter/setter make a thread-shared
-// m_attr_live the single source of truth so the audio/worker perform thread can
-// read the current value without touching the Max API.
-
-bool live::is_attr(const std::string &name) const {
-  for (const auto &s : m_attr_slots)
-    if (s.name == name)
-      return true;
-  return false;
-}
-
-void live::set_attr(const std::string &name, double value) {
-  if (!is_attr(name)) {
-    cerr << "no attribute '" << name << "'" << endl;
-    return;
-  }
-  // Max applies the clip filter, then calls attr_set (-> attr_store).
-  c74::max::object_attr_setfloat((c74::max::t_object *)(*this),
-                                 c74::max::gensym(name.c_str()), value);
-}
-
-// Setter side: store the (clamped) value into the parallel live buffer.
-void live::attr_store(const char *name, double value) {
-  for (size_t i = 0; i < m_attr_slots.size(); i++)
-    if (m_attr_slots[i].name == name) {
-      const AttrSlot &s = m_attr_slots[i];
-      if (s.max > s.min)
-        value = std::min(std::max(value, s.min), s.max); // defensive clamp
-      m_attr_live[i] = (float)value;
-      return;
-    }
-}
-
-double live::attr_load(const char *name) const {
-  for (size_t i = 0; i < m_attr_slots.size(); i++)
-    if (m_attr_slots[i].name == name)
-      return (double)m_attr_live[i];
-  return 0.0;
-}
-
-c74::max::t_max_err live::attr_set(c74::max::t_object *x, c74::max::t_object *attr,
-                                 long ac, c74::max::t_atom *av) {
-  if (!x || ac < 1 || !av)
-    return 0;
-  live &self = reinterpret_cast<c74::min::minwrap<live> *>(x)->m_min_object;
-  auto *nm = (c74::max::t_symbol *)c74::max::object_method(
-      attr, c74::max::gensym("getname"));
-  if (nm)
-    self.attr_store(nm->s_name, c74::max::atom_getfloat(av));
-  return 0;
-}
-
-c74::max::t_max_err live::attr_get(c74::max::t_object *x, c74::max::t_object *attr,
-                                 long *ac, c74::max::t_atom **av) {
-  live &self = reinterpret_cast<c74::min::minwrap<live> *>(x)->m_min_object;
-  auto *nm = (c74::max::t_symbol *)c74::max::object_method(
-      attr, c74::max::gensym("getname"));
-  double v = nm ? self.attr_load(nm->s_name) : 0.0;
-  // Reuse the caller's atom if one was provided, else allocate (Max frees it).
-  if (*ac < 1 || !*av) {
-    if (*av)
-      c74::max::sysmem_freeptr(*av);
-    *ac = 1;
-    *av = (c74::max::t_atom *)c74::max::sysmem_newptr(sizeof(c74::max::t_atom));
-  }
-  c74::max::atom_setfloat(*av, v);
-  return 0;
-}
-
-// Re-derive the dynamic attributes from the loaded model's method. Called from
-// the ctor and on reload (the perform thread is quiesced at both points).
-void live::add_dynamic_attributes() {
-  c74::max::t_object *self = (c74::max::t_object *)(*this);
-  for (const auto &s : m_attr_slots) // drop a previous model's attributes
-    c74::max::object_deleteattr(self, c74::max::gensym(s.name.c_str()));
-  m_attr_slots.clear();
-  m_attr_live.clear();
-  if (!m_model || !m_model->has_metadata())
-    return;
-
-  // Populate slots + live values first so the setter (fired by the default-set
-  // below, and by @box-args after the ctor) can resolve each slot by name.
-  for (const auto &a : m_model->method_attributes(m_method)) {
-    m_attr_slots.push_back({a.name, a.min, a.max, a.def, a.description});
-    m_attr_live.push_back((float)a.def);
-  }
-
-  for (const auto &a : m_model->method_attributes(m_method)) {
-    c74::max::t_object *attr = (c74::max::t_object *)c74::max::attribute_new(
-        a.name.c_str(), c74::max::gensym("float64"), 0,
-        (c74::max::method)&live::attr_get, (c74::max::method)&live::attr_set);
-    if (!attr)
-      continue;
-    if (a.max > a.min)
-      c74::max::attr_addfilter_clip(attr, a.min, a.max, 1, 1);
-    c74::max::object_addattr(self, attr);
-    c74::max::object_attr_setfloat(self, c74::max::gensym(a.name.c_str()), a.def);
-    if (!a.description.empty())
-      c74::max::object_attr_addattr_format(
-          self, a.name.c_str(), "label", c74::max::gensym("symbol"), 0, "s",
-          c74::max::gensym(a.description.c_str()));
-  }
 }
 
 void live::operator()(audio_bundle input, audio_bundle output) {
@@ -701,9 +508,8 @@ void live::perform(audio_bundle input, audio_bundle output) {
     if (!m_use_thread) {
       // Single-threaded: this same thread runs inference below, so refreshing the
       // held conditioning + matrix noise here cannot race the model's read of
-      // m_supplied. Both write into m_supplied, which model_perform then reads.
-      snapshot_conditions();
-      snapshot_noise();
+      // m_inputs.supplied. Both write into m_inputs.supplied, which model_perform then reads.
+      m_inputs.snapshot();
 
       // TRANSFER MEMORY BETWEEN INPUT CIRCULAR BUFFER AND MODEL BUFFER
       for (int c(0); c < m_in_dim; c++)
@@ -719,15 +525,14 @@ void live::perform(audio_bundle input, audio_bundle output) {
     } else if (m_result_available_lock.try_acquire()) {
       // Acquiring m_result_available_lock means the worker finished the previous
       // block and is now parked on m_data_available_lock — i.e. it is NOT reading
-      // m_supplied. Refreshing the held conditioning + matrix noise is therefore
-      // safe ONLY here: the worker won't touch m_supplied again until we release
+      // m_inputs.supplied. Refreshing the held conditioning + matrix noise is therefore
+      // safe ONLY here: the worker won't touch m_inputs.supplied again until we release
       // m_data_available_lock below. (Doing this before the try_acquire — as the
-      // code previously did — lets the audio thread mutate the m_supplied map
+      // code previously did — lets the audio thread mutate the m_inputs.supplied map
       // while a busy worker is traversing it in Backend::perform, corrupting the
       // tree. That crash only surfaced once a condition/noise input populated
-      // m_supplied; with an empty map there were no nodes to race over.)
-      snapshot_conditions();
-      snapshot_noise();
+      // m_inputs.supplied; with an empty map there were no nodes to race over.)
+      m_inputs.snapshot();
 
       // TRANSFER MEMORY BETWEEN INPUT CIRCULAR BUFFER AND MODEL BUFFER
       for (int c(0); c < m_in_dim; c++)
@@ -750,314 +555,6 @@ void live::perform(audio_bundle input, audio_bundle output) {
     auto out = output.samples(c);
     m_out_buffer[c].get(out, vec_size);
   }
-}
-
-// --- Conditioning -----------------------------------------------------------
-// Resolve the loaded method's condition-role inputs: their names (in declared
-// order, mapping a control inlet position) and per-input (dtype, per-batch
-// numel). Called from the ctor and on reload (the perform thread is quiesced at
-// both points). Clears any previously cached conditioning.
-void live::build_condition_meta() {
-  m_cond_names.clear();
-  m_cond_meta.clear();
-  {
-    std::lock_guard<std::mutex> lk(m_cond_mutex);
-    m_cond.clear();
-  }
-  m_cond_snapshot.clear();
-  m_supplied.clear();
-  m_cond_dirty.store(false);
-  if (!m_model || !m_model->has_metadata())
-    return;
-  for (const auto &in : m_model->method_inputs(m_method)) {
-    if (in.role != Role::Condition)
-      continue;
-    // Per-batch numel = product of shape[1:] (the leading dim is the batch the
-    // host replicates to n_batches; matches Backend::perform's expectation).
-    size_t per_batch = 1;
-    for (size_t k = 1; k < in.shape.size(); k++)
-      per_batch *= (size_t)in.shape[k];
-    m_cond_names.push_back(in.name);
-    m_cond_meta[in.name] = {in.dtype, per_batch};
-  }
-}
-
-// Snapshot the held conditioning into the map perform() reads. Audio-thread
-// side of the handoff: only rebuilds when the control thread flagged a change,
-// and only if it can grab the lock without blocking (reuse the last snapshot on
-// contention). m_supplied points into m_cond_snapshot, which is rewritten only
-// here — and only while the worker is idle — so the worker reads it safely.
-void live::snapshot_conditions() {
-  if (!m_cond_dirty.load())
-    return;
-  if (!m_cond_mutex.try_lock())
-    return;
-  m_cond_snapshot = m_cond;
-  m_cond_dirty.store(false);
-  m_cond_mutex.unlock();
-  // Set/refresh only the condition keys (held — never removed in steady state),
-  // so the matrix-noise entries in m_supplied are left intact (snapshot_noise
-  // owns those). build_condition_meta clears m_supplied wholesale on (re)load.
-  for (auto &kv : m_cond_snapshot) {
-    auto mit = m_cond_meta.find(kv.first);
-    if (mit == m_cond_meta.end())
-      continue;
-    m_supplied[kv.first] = {mit->second.first, kv.second.data(),
-                            kv.second.size() / live_dtype_size(mit->second.first)};
-  }
-}
-
-// A bare list on a condition's control inlet: assign it to the condition at this
-// inlet's position (the condition inlets follow the m_in_dim signal inlets).
-void live::receive_list(const atoms &args, int inlet) {
-  const int j = inlet - m_in_dim;
-  if (j < 0 || j >= (int)m_cond_names.size()) {
-    cerr << "list on inlet " << inlet << " has no condition input" << endl;
-    return;
-  }
-  const std::string &name = m_cond_names[j];
-  auto mit = m_cond_meta.find(name);
-  if (mit == m_cond_meta.end())
-    return;
-  if ((size_t)args.size() != mit->second.second)
-    cerr << "condition '" << name << "' expects " << mit->second.second
-         << " value(s), got " << args.size() << endl;
-  std::vector<char> bytes = cond_atoms_to_bytes(
-      mit->second.first, (long)args.size(),
-      [&](long k) { return (long long)args[k]; },
-      [&](long k) { return (double)args[k]; });
-  {
-    std::lock_guard<std::mutex> lk(m_cond_mutex);
-    m_cond[name] = std::move(bytes);
-  }
-  m_cond_dirty.store(true);
-}
-
-// A Max dictionary: store every entry whose key names a condition input (merged,
-// so several dicts accumulate). The dict may arrive as a direct object atom or a
-// registered name. Mirrors neural.gen~'s by-name path.
-void live::receive_dict(const atoms &args) {
-  if (args.empty()) {
-    cerr << "dictionary message has no payload" << endl;
-    return;
-  }
-  c74::max::t_atom *a0 = (c74::max::t_atom *)&args[0];
-  c74::max::t_dictionary *d = nullptr;
-  bool retained = false;
-  if (c74::max::atomisdictionary(a0)) {
-    d = (c74::max::t_dictionary *)c74::max::atom_getobj(a0);
-  } else {
-    symbol name = args[0];
-    d = c74::max::dictobj_findregistered_retain((c74::max::t_symbol *)name);
-    retained = true;
-    if (!d) {
-      cerr << "dictionary '" << std::string(name.c_str()) << "' not found" << endl;
-      return;
-    }
-  }
-  if (!d)
-    return;
-
-  bool matched_any = false;
-  for (const auto &name : m_cond_names) {
-    auto mit = m_cond_meta.find(name);
-    if (mit == m_cond_meta.end())
-      continue;
-    c74::max::t_symbol *key = c74::max::gensym(name.c_str());
-    if (!c74::max::dictionary_hasentry(d, key))
-      continue;
-    long argc = 0;
-    c74::max::t_atom *argv = nullptr;
-    if (c74::max::dictionary_getatoms(d, key, &argc, &argv) !=
-            c74::max::MAX_ERR_NONE ||
-        !argv)
-      continue;
-    std::vector<char> bytes = cond_atoms_to_bytes(
-        mit->second.first, argc,
-        [&](long k) { return c74::max::atom_getlong(argv + k); },
-        [&](long k) { return c74::max::atom_getfloat(argv + k); });
-    {
-      std::lock_guard<std::mutex> lk(m_cond_mutex);
-      m_cond[name] = std::move(bytes);
-    }
-    matched_any = true;
-  }
-  if (retained)
-    c74::max::dictobj_release(d);
-  if (matched_any)
-    m_cond_dirty.store(true);
-  else
-    cerr << "dictionary held no keys matching a condition input" << endl;
-}
-
-// --- Matrix noise -----------------------------------------------------------
-// Resolve the loaded method's matrix-drivable noise inputs (their folded
-// geometry), so a Jitter matrix can drive them instead of the seeded stream.
-// Called from the ctor and on reload (the perform thread is quiesced at both
-// points). The jit_matrix inlets + `<name>_inlet` toggles are fixed at
-// construction; only the geometry is re-derived here. Clears any cached matrix.
-void live::build_matrix_noise_meta() {
-  m_matrix_noise.clear();
-  {
-    std::lock_guard<std::mutex> lk(m_noise_mutex);
-    m_noise.clear();
-    m_noise_enabled.clear();
-  }
-  m_noise_snapshot.clear();
-  m_noise_dirty.store(false);
-  if (!m_model || !m_model->has_metadata())
-    return;
-  m_matrix_noise = detect_matrix_noise(m_model->method_inputs(m_method), cerr);
-}
-
-// Snapshot the enabled matrix noise into the map perform() reads. Audio-thread
-// side of the handoff (only when the control thread flagged a change and the
-// lock is free): m_supplied points into m_noise_snapshot, rewritten only here —
-// and only while the worker is idle — so the worker reads it safely. A noise
-// input that is disabled or has no valid matrix is removed from m_supplied, so
-// the backend falls back to its seeded per-input stream.
-void live::snapshot_noise() {
-  if (!m_noise_dirty.load())
-    return;
-  if (!m_noise_mutex.try_lock())
-    return;
-  m_noise_snapshot = m_noise;
-  std::map<std::string, bool> enabled = m_noise_enabled;
-  m_noise_dirty.store(false);
-  m_noise_mutex.unlock();
-  for (const auto &nz : m_matrix_noise) {
-    auto en = enabled.find(nz.name);
-    auto sn = m_noise_snapshot.find(nz.name);
-    if (en != enabled.end() && en->second && sn != m_noise_snapshot.end() &&
-        sn->second.size() == nz.numel) {
-      m_supplied[nz.name] = {executorch::aten::ScalarType::Float,
-                             sn->second.data(), sn->second.size()};
-    } else {
-      m_supplied.erase(nz.name); // disabled / invalid => backend reseeds
-    }
-  }
-}
-
-// A Jitter matrix on a matrix-noise inlet (selector "jit_matrix"): decode it via
-// the shared reader into the control-side m_noise[name]. `inlet` is the arriving
-// absolute inlet index, mapped to a noise name by m_noise_inlet_name.
-void live::receive_matrix(const atoms &args, int inlet) {
-  if (!m_model || !m_model->has_metadata()) {
-    cerr << "no model loaded" << endl;
-    return;
-  }
-  auto it = m_noise_inlet_name.find(inlet);
-  if (it == m_noise_inlet_name.end()) {
-    cerr << "jit_matrix arrived on inlet " << inlet
-         << ", which has no matrix-noise input" << endl;
-    return;
-  }
-  const std::string &name = it->second;
-  const MatrixNoise *nz = nullptr;
-  for (const auto &z : m_matrix_noise)
-    if (z.name == name) {
-      nz = &z;
-      break;
-    }
-  if (!nz) {
-    cerr << "noise '" << name
-         << "' is not a matrix-noise input in the loaded model" << endl;
-    return;
-  }
-  std::vector<float> buf;
-  if (!read_jit_matrix(args, *nz, buf, cerr))
-    return; // shared reader logged the reason
-  bool enabled;
-  {
-    std::lock_guard<std::mutex> lk(m_noise_mutex);
-    m_noise[name] = std::move(buf);
-    auto en = m_noise_enabled.find(name);
-    enabled = (en != m_noise_enabled.end() && en->second);
-  }
-  m_noise_dirty.store(true);
-  if (!enabled)
-    cerr << "noise '" << name << "' received but not enabled; set @" << name
-         << "_inlet 1 to use it (seeded until then)" << endl;
-}
-
-// Re-create the `<name>_inlet` boolean (long, 0/1) attributes from the current
-// matrix-noise inputs. Mirrors add_dynamic_attributes; called from the ctor and
-// on reload (perform thread quiesced at both points).
-void live::add_noise_inlet_attributes() {
-  c74::max::t_object *self = (c74::max::t_object *)(*this);
-  for (const auto &n : m_noise_attr_slots) // drop a previous model's toggles
-    c74::max::object_deleteattr(self, c74::max::gensym(n.c_str()));
-  m_noise_attr_slots.clear();
-  if (!m_model || !m_model->has_metadata())
-    return;
-  for (const auto &nz : m_matrix_noise) {
-    {
-      std::lock_guard<std::mutex> lk(m_noise_mutex);
-      m_noise_enabled[nz.name] = false;
-    }
-    // Shared factory; pass live~'s custom thread-safe accessors so the audio
-    // thread can read the toggle (via m_noise_enabled) every block. Adds the
-    // on/off checkbox style + descriptive label, matching neural.gen~.
-    std::string an = make_noise_inlet_attr(
-        self, nz, (c74::max::method)&live::noise_inlet_get,
-        (c74::max::method)&live::noise_inlet_set);
-    if (!an.empty())
-      m_noise_attr_slots.push_back(an);
-  }
-}
-
-// Strip the fixed "_inlet" suffix to recover the noise input name an attribute
-// names; returns false if `attr_name` is not a `<name>_inlet`.
-static bool noise_name_of(const char *attr_name, std::string &out) {
-  std::string s(attr_name);
-  static const std::string suf = "_inlet";
-  if (s.size() <= suf.size() || s.compare(s.size() - suf.size(), suf.size(), suf))
-    return false;
-  out = s.substr(0, s.size() - suf.size());
-  return true;
-}
-
-c74::max::t_max_err live::noise_inlet_set(c74::max::t_object *x,
-                                          c74::max::t_object *attr, long ac,
-                                          c74::max::t_atom *av) {
-  if (!x || ac < 1 || !av)
-    return 0;
-  live &self = reinterpret_cast<c74::min::minwrap<live> *>(x)->m_min_object;
-  auto *nm = (c74::max::t_symbol *)c74::max::object_method(
-      attr, c74::max::gensym("getname"));
-  std::string name;
-  if (nm && noise_name_of(nm->s_name, name)) {
-    const bool on = c74::max::atom_getlong(av) != 0;
-    {
-      std::lock_guard<std::mutex> lk(self.m_noise_mutex);
-      self.m_noise_enabled[name] = on;
-    }
-    self.m_noise_dirty.store(true); // re-snapshot so perform picks up the toggle
-  }
-  return 0;
-}
-
-c74::max::t_max_err live::noise_inlet_get(c74::max::t_object *x,
-                                          c74::max::t_object *attr, long *ac,
-                                          c74::max::t_atom **av) {
-  live &self = reinterpret_cast<c74::min::minwrap<live> *>(x)->m_min_object;
-  auto *nm = (c74::max::t_symbol *)c74::max::object_method(
-      attr, c74::max::gensym("getname"));
-  long v = 0;
-  std::string name;
-  if (nm && noise_name_of(nm->s_name, name)) {
-    std::lock_guard<std::mutex> lk(self.m_noise_mutex);
-    auto it = self.m_noise_enabled.find(name);
-    v = (it != self.m_noise_enabled.end() && it->second) ? 1 : 0;
-  }
-  if (*ac < 1 || !*av) {
-    if (*av)
-      c74::max::sysmem_freeptr(*av);
-    *ac = 1;
-    *av = (c74::max::t_atom *)c74::max::sysmem_newptr(sizeof(c74::max::t_atom));
-  }
-  c74::max::atom_setlong(*av, v);
-  return 0;
 }
 
 MIN_EXTERNAL(live);
