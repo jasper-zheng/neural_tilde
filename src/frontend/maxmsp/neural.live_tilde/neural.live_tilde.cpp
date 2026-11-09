@@ -215,7 +215,7 @@ public:
       this, "maxclass_setup",
       [this](const c74::min::atoms &args, const int inlet) -> c74::min::atoms {
         cout << "neural.live~ " << VERSION << " - " << NN_ENGINE_NAME
-             << " - July-2026 - Jasper Shuoyang Zheng " << endl;
+             << " - Nov-2026 - Jasper Shuoyang Zheng " << endl;
         cout << "docs: https://github.com/jasper-zheng/neural_tilde" << endl;
         install_default_console_sink();
         return {};
