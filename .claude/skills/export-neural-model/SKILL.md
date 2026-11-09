@@ -61,7 +61,7 @@ pip install -r requirements-cuda.txt                                            
 pip install -e . --no-deps
 ```
 
-- **Version 0.1.0**, pinned to **ExecuTorch 1.5.1** on both platforms (torch 2.14.0). The
+- **Version 0.1.1**, pinned to **ExecuTorch 1.5.1** on both platforms (torch 2.14.0). The
   public API is `neural_tilde.LiveModule`, `neural_tilde.GenModule`, `neural_tilde.Tokenizer`.
 - Platforms: **macOS on Apple Silicon** (Core ML runtime needs **macOS 15+** — the exporter
   targets `iOS18` / native Core ML state) and **Windows x64** (CUDA models need an NVIDIA GPU
